@@ -1,0 +1,152 @@
+原子操作列表
+
+变量说明：
+  <obj_a> / <obj_b>            物品(obj_a 通常是手里操作的物品,obj_b 是目标/容器物品)
+  <sur_a>                      表面（桌面、台面等可放置的面）
+  <spa_a>                      空间（冰箱、抽屉等可放入的内部空间）
+  <rotational_hinge_a>         旋转铰链部件（如门、柜门）
+  <sliding_hinge_a>            滑动铰链部件（如抽屉、推拉门）
+  <button_a>                   按钮
+  <state>                      铰链目标状态
+  <coef_...>                   系数/修饰词，从对应 coef 列表中取值
+
+========================================
+
+A_001 拿起
+Pick
+logic0: Pick up the <obj_a>.
+
+        拿起 <obj_a>。
+
+A_002 放下
+Place
+logic0: Place the <obj_a> <coef_spatial_relation_a> the <obj_b>.
+
+        把 <obj_a> 放在 <obj_b> 的 <coef_spatial_relation_a>。
+
+logic1: Place the <obj_a> on the <sur_a>.
+
+        把 <obj_a> 放在 <sur_a> 上。
+
+logic2: Place the <obj_a> into the <spa_a>.
+
+        把 <obj_a> 放进 <spa_a>。
+
+coef_spatial_relation_a 可选值:
+        to the left of / to the right of / in front of / behind
+        左边 / 右边 / 前面 / 后面
+
+A_003 搬运
+Carry
+logic0: Carry the <obj_a>.
+
+        搬运 <obj_a>。
+
+A_004 拉
+Pull
+logic0: Pull the <rotational_hinge_a> to <state> state.
+
+        把 <rotational_hinge_a> 拉到 <state> 状态。
+
+logic1: Pull the <sliding_hinge_a> to <state> state.
+
+        把 <sliding_hinge_a> 拉到 <state> 状态。
+
+logic2: Pull the <obj_a> <coef_open_close>.
+
+        <coef_open_close> <obj_a>。
+
+coef_open_close 可选值:
+        open / closed
+        拉开 / 关上
+
+A_005 推
+Push
+logic0: Push the <rotational_hinge_a> to <state> state.
+
+        把 <rotational_hinge_a> 推到 <state> 状态。
+
+logic1: Push the <sliding_hinge_a> to <state> state.
+
+        把 <sliding_hinge_a> 推到 <state> 状态。
+
+logic2: Push the <obj_a> <coef_open_close>.
+
+        <coef_open_close> <obj_a>。
+
+coef_open_close 可选值:
+        open / closed
+        推开 / 关上
+
+A_006 挂
+Hang
+logic0: Hang the <obj_a> on the <obj_b>.
+
+        把 <obj_a> 挂在 <obj_b> 上。
+
+A_007 倒液体
+Pour
+logic0: Pour the contents of the <obj_a> into the <obj_b>.
+
+        把 <obj_a> 里的液体倒进 <obj_b>。
+
+A_008 按按钮
+PressButton
+logic0: Press the <button_a>.
+
+        按下 <button_a>。
+
+A_009 擦拭
+Wipe
+logic0: Wipe the <sur_a> with the <obj_a>.
+
+        用 <obj_a> 擦 <sur_a>。
+
+A_010 插入
+Insert
+logic0: Insert the <obj_a> into the <obj_b>.
+
+        把 <obj_a> 插进 <obj_b>。
+
+A_011 旋转
+Rotate
+logic0: Rotate the <rotational_hinge_a> to <state> state.
+
+        把 <rotational_hinge_a> 旋转到 <state> 状态。
+
+A_012 舀
+Scoop
+logic0: Scoop the contents of the <obj_b> with the <obj_a>.
+
+        用 <obj_a> 从 <obj_b> 里舀出内容。
+
+A_013 搅拌
+Stir
+logic0: Stir the contents of the <obj_b> with the <obj_a>.
+
+        用 <obj_a> 搅拌 <obj_b> 里的内容。
+
+A_014 翻转
+Turn
+logic0: Turn over the <obj_a>.
+
+        把 <obj_a> 翻面。
+
+A_015 刷卡
+Swipe
+logic0: Swipe the <obj_a> through the <obj_b>.
+
+        用 <obj_a> 在 <obj_b> 上刷过。
+
+A_016 关闭
+Close
+logic0: Close the <obj_a>.
+
+        关闭 <obj_a>。
+
+A_017 打开
+Open
+logic0: Open the <obj_a>.
+
+        打开 <obj_a>。
+

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>指令拆解 · Instruction Break-Down</title>
+<style>
+  :root {
+    --bg: #f4f5fb;
+    --card: #ffffff;
+    --ink: #1c2033;
+    --muted: #6b7089;
+    --line: #e6e8f2;
+    --accent: #5b5bd6;
+    --accent-soft: #eeeefc;
+    --ok: #1a9e6e;
+    --warn: #b57e10;
+    --warn-bg: #fdf6e7;
+    --bad: #d14343;
+    --bad-bg: #fdf0f0;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+                 "Microsoft YaHei", sans-serif;
+    background:
+      radial-gradient(1000px 500px at 15% -10%, #e6e6fb 0%, transparent 60%),
+      radial-gradient(900px 450px at 90% 0%, #e3f0ec 0%, transparent 55%),
+      var(--bg);
+    color: var(--ink);
+    min-height: 100vh;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 20px 80px; }
+
+  header { text-align: center; margin-bottom: 36px; }
+  .logo {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 28px; font-weight: 700; letter-spacing: 1px;
+  }
+  .logo .mark {
+    width: 40px; height: 40px; border-radius: 12px;
+    background: linear-gradient(135deg, #6a6af0, #4747c2);
+    color: #fff; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 20px; box-shadow: 0 6px 16px rgba(91, 91, 214, .35);
+  }
+  header p { color: var(--muted); margin-top: 10px; font-size: 14.5px; }
+
+  .panel {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 30px rgba(28, 32, 51, .06);
+    padding: 22px;
+  }
+
+  .provider-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .provider-row .label { font-size: 13px; color: var(--muted); margin-right: 2px; }
+  .pill {
+    border: 1px solid var(--line); background: #fafbff; color: var(--muted);
+    padding: 6px 14px; border-radius: 999px; font-size: 13px; cursor: pointer;
+    transition: all .15s ease;
+  }
+  .pill:hover { border-color: var(--accent); color: var(--accent); }
+  .pill.active {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    box-shadow: 0 4px 10px rgba(91, 91, 214, .3);
+  }
+
+  .input-row { display: flex; gap: 10px; }
+  #instruction {
+    flex: 1; font-size: 16px; padding: 13px 16px;
+    border: 1.5px solid var(--line); border-radius: 10px; outline: none;
+    font-family: inherit; color: var(--ink); background: #fcfcff;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  #instruction:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  #submit {
+    padding: 0 26px; font-size: 15.5px; font-weight: 600; color: #fff;
+    background: linear-gradient(135deg, #6a6af0, #4f4fce);
+    border: none; border-radius: 10px; cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: transform .1s ease, box-shadow .15s ease;
+    box-shadow: 0 5px 14px rgba(91, 91, 214, .3);
+  }
+  #submit:hover:not(:disabled) { transform: translateY(-1px); }
+  #submit:disabled { opacity: .65; cursor: not-allowed; }
+  .spinner {
+    width: 15px; height: 15px; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, .4); border-top-color: #fff;
+    animation: spin .7s linear infinite; display: none;
+  }
+  #submit.loading .spinner { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .examples { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .examples .label { font-size: 12.5px; color: var(--muted); }
+  .chip {
+    font-size: 12.5px; color: var(--accent); background: var(--accent-soft);
+    border: none; padding: 5px 11px; border-radius: 999px; cursor: pointer;
+    font-family: inherit; transition: all .15s ease;
+  }
+  .chip:hover { background: #e0e0fa; }
+  .chip.warn { color: var(--warn); background: var(--warn-bg); }
+  .chip.bad  { color: var(--bad);  background: var(--bad-bg); }
+
+  #result { margin-top: 26px; }
+  .fade-in { animation: fade .3s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+
+  .result-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px; gap: 10px; flex-wrap: wrap;
+  }
+  .result-head .q { font-size: 15px; font-weight: 600; }
+  .result-head .q span { color: var(--muted); font-weight: 400; }
+  .meta { font-size: 12px; color: var(--muted); }
+
+  .steps { position: relative; }
+  .step {
+    display: flex; gap: 14px; padding: 12px 0; position: relative;
+  }
+  .step:not(:last-child)::before {
+    content: ""; position: absolute; left: 15px; top: 44px; bottom: -12px;
+    width: 2px; background: var(--line);
+  }
+  .step .num {
+    flex: none; width: 32px; height: 32px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; margin-top: 2px; z-index: 1;
+  }
+  .step .body { flex: 1; min-width: 0; }
+  .step .zh { font-size: 15.5px; font-weight: 600; }
+  .step .en { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .step .tags { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag {
+    font-size: 11.5px; padding: 2.5px 9px; border-radius: 6px;
+    background: #f2f3f9; color: var(--muted); border: 1px solid var(--line);
+  }
+  .tag.action { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 600; }
+
+  .banner {
+    border-radius: 10px; padding: 14px 16px; font-size: 14.5px; line-height: 1.65;
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .banner .icon { font-size: 17px; margin-top: 1px; }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid #f3e3bd; }
+  .banner.bad  { background: var(--bad-bg);  color: var(--bad);  border: 1px solid #f5cfcf; }
+  .banner strong { display: block; margin-bottom: 2px; }
+
+  footer { text-align: center; margin-top: 44px; font-size: 12px; color: #a0a4b8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><span class="mark">⚙</span>指令拆解</div>
+    <p>输入一条自然语言指令,拆解为机器人可执行的原子操作序列(17 个 Action Primitives)</p>
+  </header>
+
+  <div class="panel">
+    <div class="provider-row" id="providerRow">
+      <span class="label">模型提供商</span>
+    </div>
+    <div class="input-row">
+      <input id="instruction" type="text" placeholder="例如:把水壶放到桌子上" autocomplete="off">
+      <button id="submit"><span class="spinner"></span><span id="submitText">拆解</span></button>
+    </div>
+    <div class="examples">
+      <span class="label">试一试:</span>
+      <button class="chip" data-i="把水壶放到桌子上">把水壶放到桌子上</button>
+      <button class="chip" data-i="把牛奶放进冰箱">把牛奶放进冰箱</button>
+      <button class="chip" data-i="用抹布擦桌子">用抹布擦桌子</button>
+      <button class="chip warn" data-i="把水壶放到那边">把水壶放到那边</button>
+      <button class="chip bad" data-i="把苹果切成两半">把苹果切成两半</button>
+    </div>
+  </div>
+
+  <div id="result"></div>
+
+  <footer>Instruction Break-Down · GLM / DeepSeek / OpenRouter</footer>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let provider = "deepseek";
+
+async function initProviders() {
+  try {
+    const res = await fetch("/api/providers");
+    const data = await res.json();
+    provider = data.default;
+    const row = $("#providerRow");
+    data.providers.forEach((p) => {
+      const btn = document.createElement("button");
+      btn.className = "pill" + (p === provider ? " active" : "");
+      btn.textContent = p;
+      btn.onclick = () => {
+        provider = p;
+        row.querySelectorAll(".pill").forEach((b) => b.classList.toggle("active", b === btn));
+      };
+      row.appendChild(btn);
+    });
+  } catch (e) { /* 提供商列表加载失败不阻塞页面 */ }
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function renderSlots(step) {
+  const slots = step.slots || {};
+  const tags = [`<span class="tag action">${esc(step.action_id)} ${esc(step.action)} / logic${esc(step.logic)}</span>`];
+  for (const [k, v] of Object.entries(slots)) {
+    tags.push(`<span class="tag">${esc(k)} = ${esc(v)}</span>`);
+  }
+  return tags.join("");
+}
+
+function render(data, elapsed) {
+  const box = $("#result");
+  const meta = `<span class="meta">${esc(provider)} · ${(elapsed / 1000).toFixed(1)}s</span>`;
+
+  if (data.status === "ok") {
+    const steps = data.steps.map((s, i) => `
+      <div class="step">
+        <div class="num">${i + 1}</div>
+        <div class="body">
+          <div class="zh">${esc(s.zh)}</div>
+          <div class="en">${esc(s.en)}</div>
+          <div class="tags">${renderSlots(s)}</div>
+        </div>
+      </div>`).join("");
+    box.innerHTML = `
+      <div class="panel fade-in">
+        <div class="result-head">
+          <div class="q"><span>指令:</span>${esc(data.instruction)}</div>${meta}
+        </div>
+        <div class="steps">${steps}</div>
+      </div>`;
+  } else {
+    const isWarn = data.status === "ambiguous";
+    const title = isWarn ? "指令不明确" : (data.status === "infeasible" ? "无法完成" : "出错了");
+    const cls = isWarn ? "warn" : "bad";
+    const icon = isWarn ? "⚠" : "✕";
+    box.innerHTML = `
+      <div class="panel fade-in">
+        <div class="result-head">
+          <div class="q"><span>指令:</span>${esc(data.instruction || $("#instruction").value)}</div>${meta}
+        </div>
+        <div class="banner ${cls}">
+          <span class="icon">${icon}</span>
+          <div><strong>${title}</strong>${esc(data.reason)}</div>
+        </div>
+      </div>`;
+  }
+}
+
+async function submit() {
+  const instruction = $("#instruction").value.trim();
+  if (!instruction) { $("#instruction").focus(); return; }
+  const btn = $("#submit");
+  btn.disabled = true; btn.classList.add("loading");
+  $("#submitText").textContent = "拆解中";
+  const t0 = performance.now();
+  try {
+    const res = await fetch("/api/decompose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction, provider }),
+    });
+    const data = await res.json();
+    render(data, performance.now() - t0);
+  } catch (e) {
+    render({ status: "error", reason: "请求失败: " + e.message, instruction }, performance.now() - t0);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+    $("#submitText").textContent = "拆解";
+  }
+}
+
+$("#submit").onclick = submit;
+$("#instruction").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+document.querySelectorAll(".chip").forEach((c) => {
+  c.onclick = () => { $("#instruction").value = c.dataset.i; submit(); };
+});
+initProviders();
+</script>
+</body>
+</html>
