@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from decompose import decompose
+from primitives import load_atomic_catalog, load_expert_catalog
 from providers import PROVIDERS
 
 app = FastAPI(title="指令拆解 Instruction Break-Down")
@@ -33,6 +34,11 @@ class DecomposeRequest(BaseModel):
 @app.get("/api/providers")
 def list_providers() -> dict:
     return {"providers": list(PROVIDERS), "default": "deepseek"}
+
+
+@app.get("/api/operations")
+def list_operations() -> dict:
+    return {"atomic": load_atomic_catalog(), "expert": load_expert_catalog()}
 
 
 @app.post("/api/decompose")

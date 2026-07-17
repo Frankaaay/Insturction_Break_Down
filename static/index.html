@@ -152,6 +152,44 @@
   .banner.bad  { background: var(--bad-bg);  color: var(--bad);  border: 1px solid #f5cfcf; }
   .banner strong { display: block; margin-bottom: 2px; }
 
+  /* —— 操作库 —— */
+  #ops { margin-top: 44px; }
+  .ops-head { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 14px; }
+  .ops-head h2 { font-size: 18px; }
+  .ops-head .count {
+    font-size: 12px; color: var(--accent); background: var(--accent-soft);
+    padding: 2px 10px; border-radius: 999px; font-weight: 600;
+  }
+  .ops-head .sub { font-size: 12.5px; color: var(--muted); }
+  .ops-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 12px;
+  }
+  .op-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; transition: box-shadow .15s ease, transform .15s ease;
+  }
+  .op-card:hover { box-shadow: 0 8px 20px rgba(28,32,51,.08); transform: translateY(-1px); }
+  .op-card .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .op-card .oid {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
+    font-weight: 700; color: var(--accent); background: var(--accent-soft);
+    padding: 2px 8px; border-radius: 6px;
+  }
+  .op-card.expert .oid { color: #b3560e; background: #fdeee0; }
+  .op-card .zh-name { font-size: 15.5px; font-weight: 700; }
+  .op-card .en-name { font-size: 12.5px; color: var(--muted); }
+  .op-card .len {
+    margin-left: auto; font-size: 11.5px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+  }
+  .op-card .logic { margin-top: 9px; font-size: 13px; line-height: 1.5; }
+  .op-card .logic .ln { color: var(--muted); font-size: 11px; font-family: ui-monospace, Consolas, monospace; }
+  .op-card .logic .lzh { font-weight: 500; }
+  .op-card .logic .len2 { color: var(--muted); font-size: 12px; }
+  .op-card .coef, .op-card .cats { margin-top: 8px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .op-card .cats .tag, .op-card .coef .tag { margin: 1px 2px 1px 0; display: inline-block; }
+
   footer { text-align: center; margin-top: 44px; font-size: 12px; color: #a0a4b8; }
 </style>
 </head>
@@ -181,6 +219,8 @@
   </div>
 
   <div id="result"></div>
+
+  <section id="ops"></section>
 
   <footer>Instruction Break-Down · GLM / DeepSeek / OpenRouter</footer>
 </div>
@@ -284,12 +324,63 @@ async function submit() {
   }
 }
 
+function opCard(op, isExpert) {
+  const logics = op.logics.map((l) => `
+    <div class="logic">
+      <span class="ln">logic${l.n}</span>
+      <span class="lzh">${esc(l.zh)}</span><br>
+      <span class="len2">${esc(l.en)}</span>
+    </div>`).join("");
+
+  let coefs = "";
+  for (const [name, v] of Object.entries(op.coefs || {})) {
+    const pairs = v.en.map((en, i) => `<span class="tag">${esc(en)} / ${esc(v.zh[i] || "")}</span>`).join("");
+    coefs += `<div class="coef">coef_${esc(name)}: ${pairs}</div>`;
+  }
+
+  let cats = "";
+  for (const [slot, objs] of Object.entries(op.categories || {})) {
+    cats += `<div class="cats">${esc(slot)}: ${objs.map((o) => `<span class="tag">${esc(o)}</span>`).join("")}</div>`;
+  }
+
+  const len = op.typical_length != null ? `<span class="len">典型长度 ${esc(op.typical_length)}</span>` : "";
+  return `
+    <div class="op-card${isExpert ? " expert" : ""}">
+      <div class="head">
+        <span class="oid">${esc(op.id)}</span>
+        <span class="zh-name">${esc(op.zh)}</span>
+        <span class="en-name">${esc(op.en)}</span>
+        ${len}
+      </div>
+      ${logics}${coefs}${cats}
+    </div>`;
+}
+
+async function loadOperations() {
+  try {
+    const res = await fetch("/api/operations");
+    const data = await res.json();
+    $("#ops").innerHTML = `
+      <div class="ops-head">
+        <h2>原子操作</h2><span class="count">${data.atomic.length}</span>
+        <span class="sub">拆解结果只会由这些操作组成</span>
+      </div>
+      <div class="ops-grid">${data.atomic.map((o) => opCard(o, false)).join("")}</div>
+      <div class="ops-head">
+        <h2>专家操作</h2><span class="count">${data.expert.length}</span>
+        <span class="sub">完整的长序列技能,不再拆分为原子操作</span>
+      </div>
+      <div class="ops-grid">${data.expert.map((o) => opCard(o, true)).join("")}</div>`;
+  } catch (e) { /* 操作库加载失败不影响拆解功能 */ }
+}
+
 $("#submit").onclick = submit;
 $("#instruction").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 document.querySelectorAll(".chip").forEach((c) => {
   c.onclick = () => { $("#instruction").value = c.dataset.i; submit(); };
 });
 initProviders();
+loadOperations();
 </script>
 </body>
 </html>
