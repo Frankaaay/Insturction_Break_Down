@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>指令拆解 · Instruction Break-Down</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     --bg: #f4f5fb;
@@ -192,195 +193,214 @@
 
   footer { text-align: center; margin-top: 44px; font-size: 12px; color: #a0a4b8; }
 </style>
+<style>
+  :root {
+    --navy: #172033;
+    --blue: #4f62e9;
+    --blue-soft: #eef1ff;
+    --green: #14865f;
+    --green-soft: #e9f8f1;
+    --red: #c83f52;
+    --red-soft: #fff0f2;
+    --amber: #b97912;
+    --amber-soft: #fff7e8;
+    --surface: rgba(255,255,255,.92);
+    --shadow: 0 18px 50px rgba(31,39,72,.09);
+  }
+  body { overflow-x: hidden; }
+  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 330px minmax(0,1fr); }
+  .library {
+    position: sticky; top: 0; height: 100vh; z-index: 20; overflow: hidden;
+    background: rgba(248,249,255,.96); border-right: 1px solid var(--line);
+    backdrop-filter: blur(18px); display: flex; flex-direction: column;
+    transition: width .22s ease, transform .22s ease;
+  }
+  .library-head { padding: 24px 20px 16px; border-bottom: 1px solid var(--line); }
+  .library-title { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .library-title strong { font-size: 16px; }
+  .library-title span { color: var(--muted); font-size:12px; }
+  .icon-btn { width:34px; height:34px; border:1px solid var(--line); background:#fff; border-radius:9px; cursor:pointer; color:var(--muted); }
+  .search-box { margin-top:14px; position:relative; }
+  .search-box input { width:100%; border:1px solid var(--line); border-radius:9px; padding:9px 12px 9px 34px; outline:none; font:inherit; font-size:13px; }
+  .search-box input:focus { border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-soft); }
+  .search-box::before { content:"⌕"; position:absolute; left:12px; top:7px; color:var(--muted); }
+  #ops { margin:0; padding:12px 14px 30px; overflow-y:auto; flex:1; }
+  .op-group { border-bottom:1px solid var(--line); padding-bottom:8px; }
+  .op-group > summary { list-style:none; display:flex; align-items:center; gap:8px; padding:11px 4px; cursor:pointer; font-size:13px; font-weight:700; }
+  .op-group > summary::-webkit-details-marker { display:none; }
+  .op-group > summary::after { content:"⌄"; margin-left:auto; color:var(--muted); transition:transform .15s; }
+  .op-group:not([open]) > summary::after { transform:rotate(-90deg); }
+  .op-count { font-size:11px; color:var(--blue); background:var(--blue-soft); border-radius:999px; padding:2px 7px; }
+  .op-item { background:#fff; border:1px solid var(--line); border-radius:10px; margin:7px 0; overflow:hidden; }
+  .op-item summary { padding:10px 11px; display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; list-style:none; cursor:pointer; }
+  .op-item summary::-webkit-details-marker { display:none; }
+  .op-item .oid { font:700 10.5px ui-monospace,Consolas,monospace; color:var(--blue); background:var(--blue-soft); padding:3px 6px; border-radius:5px; }
+  .op-item.expert .oid { color:#ad5b17; background:#fff0e3; }
+  .op-item .op-name { min-width:0; font-size:13px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .op-item .op-en { font-size:10.5px; color:var(--muted); }
+  .op-detail { border-top:1px solid var(--line); padding:9px 11px; font-size:11.5px; color:var(--muted); line-height:1.6; }
+  .op-detail b { color:var(--ink); font-weight:600; }
+  .op-detail .tag { margin:3px 2px 0 0; display:inline-block; font-size:10.5px; }
+  .library.collapsed { width:72px; }
+  .library.collapsed .library-copy, .library.collapsed .search-box, .library.collapsed #ops { display:none; }
+  .app-shell.library-collapsed { grid-template-columns:72px minmax(0,1fr); }
+  .main-area { min-width:0; transition:margin-left .22s ease; }
+  .main-wrap { max-width:1180px; margin:0 auto; padding:34px 32px 70px; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:24px; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .brand-mark { width:42px; height:42px; border-radius:13px; color:#fff; background:linear-gradient(135deg,#6678f3,#4053d5); display:grid; place-items:center; box-shadow:0 8px 20px rgba(79,98,233,.28); font-weight:800; }
+  .brand h1 { font-size:21px; letter-spacing:.2px; }
+  .brand p { color:var(--muted); font-size:12.5px; margin-top:3px; }
+  .connection { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+  .connection-dot { width:8px; height:8px; border-radius:50%; background:#a5a9ba; }
+  .connection.live .connection-dot { background:var(--green); box-shadow:0 0 0 4px var(--green-soft); }
+  .connection.wait .connection-dot { background:var(--amber); }
+  .input-panel { padding:18px; background:var(--surface); }
+  .provider-row { margin-bottom:12px; }
+  .input-row #submit { min-height:48px; }
+  .session-lock { display:none; color:var(--amber); font-size:12px; margin-top:10px; }
+  .input-panel.locked .session-lock { display:block; }
+  #result { margin-top:22px; }
+  .empty-state { min-height:330px; border:1px dashed #cdd2e6; border-radius:16px; display:grid; place-items:center; text-align:center; color:var(--muted); background:rgba(255,255,255,.42); padding:30px; }
+  .empty-state .empty-icon { font-size:34px; margin-bottom:10px; opacity:.7; }
+  .execution-head { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:17px 20px; box-shadow:var(--shadow); }
+  .execution-top { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+  .execution-title .eyebrow { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:1px; }
+  .execution-title h2 { font-size:18px; margin-top:5px; }
+  .state-pill { font-size:11.5px; font-weight:700; border-radius:999px; padding:5px 10px; background:var(--blue-soft); color:var(--blue); }
+  .state-pill.running { background:var(--amber-soft); color:var(--amber); }
+  .state-pill.completed { background:var(--green-soft); color:var(--green); }
+  .state-pill.paused,.state-pill.terminated { background:var(--red-soft); color:var(--red); }
+  .progress-row { display:flex; align-items:center; gap:12px; margin-top:14px; }
+  .progress-track { flex:1; height:7px; background:#edf0f7; border-radius:999px; overflow:hidden; }
+  .progress-bar { height:100%; border-radius:inherit; background:linear-gradient(90deg,#5266e9,#20a77b); transition:width .25s ease; }
+  .progress-copy { color:var(--muted); font-size:11.5px; white-space:nowrap; }
+  .execution-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(300px,.8fr); gap:18px; margin-top:18px; align-items:start; }
+  .chain-card,.monitor-card,.log-card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); }
+  .card-heading { padding:16px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
+  .card-heading h3 { font-size:14px; }
+  .card-heading span { color:var(--muted); font-size:11.5px; }
+  .execution-steps { padding:8px 18px 15px; }
+  .execution-step { display:grid; grid-template-columns:38px minmax(0,1fr); gap:12px; padding:12px 0; position:relative; }
+  .execution-step:not(:last-child)::after { content:""; position:absolute; left:18px; top:48px; bottom:-12px; width:2px; background:var(--line); }
+  .step-dot { width:36px; height:36px; border-radius:12px; display:grid; place-items:center; background:#f0f2f7; color:#8a90a6; font-weight:750; font-size:12px; z-index:1; border:2px solid transparent; transition:.2s; }
+  .execution-step.active .step-dot { color:var(--blue); background:var(--blue-soft); border-color:#aeb7ff; box-shadow:0 0 0 5px rgba(79,98,233,.08); }
+  .execution-step.succeeded .step-dot { color:#fff; background:var(--green); }
+  .execution-step.blocked .step-dot { color:#fff; background:var(--red); }
+  .execution-step.succeeded:not(:last-child)::after { background:var(--green); }
+  .step-main { padding-top:1px; min-width:0; }
+  .step-title { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:14px; font-weight:650; }
+  .step-title .current-label { font-size:10px; color:var(--blue); background:var(--blue-soft); border-radius:999px; padding:2px 7px; }
+  .step-en { color:var(--muted); font-size:11.5px; margin-top:3px; }
+  .step-tags { margin-top:6px; }
+  .attempts { display:flex; gap:4px; margin-top:7px; flex-wrap:wrap; }
+  .attempt-chip { font-size:10px; color:var(--muted); background:#f2f3f7; border-radius:5px; padding:2px 6px; }
+  .attempt-chip.success { color:var(--green); background:var(--green-soft); }
+  .attempt-chip.failure,.attempt-chip.timeout { color:var(--red); background:var(--red-soft); }
+  .attempt-chip.waiting { color:var(--amber); background:var(--amber-soft); }
+  .monitor-card { position:sticky; top:18px; overflow:hidden; }
+  .monitor-body { padding:20px; text-align:center; }
+  .monitor-kicker { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
+  .timer-ring { --timer-angle:360deg; width:112px; height:112px; border-radius:50%; margin:16px auto; display:grid; place-items:center; background:conic-gradient(var(--blue) var(--timer-angle),#e9ebf3 0); position:relative; }
+  .timer-ring::before { content:""; position:absolute; inset:8px; background:#fff; border-radius:50%; }
+  .timer-copy { position:relative; z-index:1; }
+  .timer-copy strong { display:block; font-size:29px; line-height:1; }
+  .timer-copy span { display:block; color:var(--muted); font-size:10px; margin-top:4px; }
+  .monitor-action { font-size:16px; font-weight:700; margin-top:4px; }
+  .monitor-sub { color:var(--muted); font-size:11.5px; margin-top:5px; line-height:1.5; }
+  .monitor-slots { display:flex; flex-wrap:wrap; justify-content:center; gap:5px; margin:12px 0; }
+  .monitor-buttons { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:15px; }
+  .control-btn { min-height:42px; border-radius:9px; border:1px solid var(--line); background:#fff; font:650 13px inherit; cursor:pointer; transition:.15s; }
+  .control-btn:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 5px 12px rgba(28,32,51,.08); }
+  .control-btn:disabled { opacity:.5; cursor:wait; }
+  .control-btn.success { color:#fff; background:var(--green); border-color:var(--green); }
+  .control-btn.failure { color:var(--red); background:var(--red-soft); border-color:#f2c5cc; }
+  .control-btn.primary { color:#fff; background:var(--blue); border-color:var(--blue); grid-column:1/-1; }
+  .control-btn.danger { color:var(--red); }
+  .monitor-note { color:var(--muted); font-size:10.5px; margin-top:12px; }
+  .log-card { margin-top:18px; overflow:hidden; }
+  .log-card summary { cursor:pointer; list-style:none; }
+  .event-list { max-height:260px; overflow:auto; border-top:1px solid var(--line); padding:7px 18px 14px; }
+  .event-row { display:grid; grid-template-columns:70px 1fr; gap:10px; padding:8px 0; border-bottom:1px solid #f0f1f6; font-size:11.5px; }
+  .event-time { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .event-text b { font-weight:650; }
+  .event-source { display:inline-block; margin-left:5px; font-size:9.5px; color:var(--muted); background:#f0f1f5; border-radius:4px; padding:1px 4px; }
+  .notice { padding:15px 17px; border-radius:12px; background:var(--amber-soft); border:1px solid #f1dfb9; color:var(--amber); font-size:13px; line-height:1.55; }
+  .notice.bad { color:var(--red); background:var(--red-soft); border-color:#f2cbd1; }
+  .mobile-library-btn { display:none; }
+  .scrim { display:none; }
+  @media (max-width: 980px) {
+    .app-shell { display:block; }
+    .library { position:fixed; width:320px; transform:translateX(-105%); box-shadow:20px 0 45px rgba(20,25,44,.15); }
+    .library.open { transform:translateX(0); }
+    .library.collapsed { width:320px; }
+    .library.collapsed .library-copy,.library.collapsed .search-box,.library.collapsed #ops { display:block; }
+    .main-area { margin-left:0; }
+    .mobile-library-btn { display:inline-grid; place-items:center; }
+    .scrim.open { display:block; position:fixed; inset:0; background:rgba(19,24,40,.35); z-index:15; }
+    .execution-grid { grid-template-columns:1fr; }
+    .monitor-card { position:static; }
+  }
+  @media (max-width: 620px) {
+    .main-wrap { padding:20px 14px 50px; }
+    .topbar { align-items:flex-start; }
+    .brand p { display:none; }
+    .input-row { flex-direction:column; }
+    #submit { padding:13px; justify-content:center; }
+    .examples { display:none; }
+    .execution-top { flex-direction:column; }
+    .execution-grid { gap:12px; }
+    .monitor-buttons { grid-template-columns:1fr; }
+    .control-btn.primary { grid-column:auto; }
+  }
+</style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="logo"><span class="mark">⚙</span>指令拆解</div>
-    <p>输入一条自然语言指令,拆解为机器人可执行的原子操作序列(17 个 Action Primitives)</p>
-  </header>
-
-  <div class="panel">
-    <div class="provider-row" id="providerRow">
-      <span class="label">模型提供商</span>
+<div class="app-shell">
+  <aside class="library" id="library">
+    <div class="library-head">
+      <div class="library-title">
+        <div class="library-copy"><strong>操作能力库</strong><br><span>Atomic & Expert Primitives</span></div>
+        <button class="icon-btn" id="closeLibrary" title="折叠侧栏">⇤</button>
+      </div>
+      <div class="search-box"><input id="opSearch" type="search" placeholder="搜索操作名称或编号"></div>
     </div>
-    <div class="input-row">
-      <input id="instruction" type="text" placeholder="例如:把水壶放到桌子上" autocomplete="off">
-      <button id="submit"><span class="spinner"></span><span id="submitText">拆解</span></button>
+    <section id="ops"><span class="meta">正在加载操作库…</span></section>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main-area">
+    <div class="main-wrap">
+      <div class="topbar">
+        <div class="brand">
+          <button class="icon-btn mobile-library-btn" id="openLibrary" title="打开操作库">☰</button>
+          <span class="brand-mark">IB</span>
+          <div><h1>Instruction Break-Down</h1><p>Planner · Orchestrator · Monitor 执行闭环</p></div>
+        </div>
+        <div class="connection wait" id="connection"><span class="connection-dot"></span><span>等待执行会话</span></div>
+      </div>
+
+      <section class="panel input-panel" id="inputPanel">
+        <div class="provider-row" id="providerRow"><span class="label">模型提供商</span></div>
+        <div class="input-row">
+          <input id="instruction" type="text" placeholder="例如：把水壶放到桌子上" autocomplete="off">
+          <button id="submit"><span class="spinner"></span><span id="submitText">生成执行计划</span></button>
+        </div>
+        <div class="examples">
+          <span class="label">快速示例：</span>
+          <button class="chip" data-i="把水壶放到桌子上">水壶放到桌上</button>
+          <button class="chip" data-i="把牛奶放进冰箱">牛奶放进冰箱</button>
+          <button class="chip" data-i="用抹布擦桌子">擦拭桌面</button>
+          <button class="chip warn" data-i="把水壶放到那边">不明确指令</button>
+        </div>
+        <div class="session-lock">当前执行会话尚未结束。请先完成或终止任务，再生成新计划。</div>
+      </section>
+
+      <section id="result"><div class="empty-state"><div><div class="empty-icon">◎</div><strong>还没有执行计划</strong><p>输入指令后，planner 会生成可监控的原子操作链。</p></div></div></section>
     </div>
-    <div class="examples">
-      <span class="label">试一试:</span>
-      <button class="chip" data-i="把水壶放到桌子上">把水壶放到桌子上</button>
-      <button class="chip" data-i="把牛奶放进冰箱">把牛奶放进冰箱</button>
-      <button class="chip" data-i="用抹布擦桌子">用抹布擦桌子</button>
-      <button class="chip warn" data-i="把水壶放到那边">把水壶放到那边</button>
-      <button class="chip bad" data-i="把苹果切成两半">把苹果切成两半</button>
-    </div>
-  </div>
-
-  <div id="result"></div>
-
-  <section id="ops"></section>
-
-  <footer>Instruction Break-Down · GLM / DeepSeek / OpenRouter</footer>
+  </main>
 </div>
 
-<script>
-const $ = (s) => document.querySelector(s);
-let provider = "deepseek";
-
-async function initProviders() {
-  try {
-    const res = await fetch("/api/providers");
-    const data = await res.json();
-    provider = data.default;
-    const row = $("#providerRow");
-    data.providers.forEach((p) => {
-      const btn = document.createElement("button");
-      btn.className = "pill" + (p === provider ? " active" : "");
-      btn.textContent = p;
-      btn.onclick = () => {
-        provider = p;
-        row.querySelectorAll(".pill").forEach((b) => b.classList.toggle("active", b === btn));
-      };
-      row.appendChild(btn);
-    });
-  } catch (e) { /* 提供商列表加载失败不阻塞页面 */ }
-}
-
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"]/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-function renderSlots(step) {
-  const slots = step.slots || {};
-  const tags = [`<span class="tag action">${esc(step.action_id)} ${esc(step.action)} / logic${esc(step.logic)}</span>`];
-  for (const [k, v] of Object.entries(slots)) {
-    tags.push(`<span class="tag">${esc(k)} = ${esc(v)}</span>`);
-  }
-  return tags.join("");
-}
-
-function render(data, elapsed) {
-  const box = $("#result");
-  const meta = `<span class="meta">${esc(provider)} · ${(elapsed / 1000).toFixed(1)}s</span>`;
-
-  if (data.status === "ok") {
-    const steps = data.steps.map((s, i) => `
-      <div class="step">
-        <div class="num">${i + 1}</div>
-        <div class="body">
-          <div class="zh">${esc(s.zh)}</div>
-          <div class="en">${esc(s.en)}</div>
-          <div class="tags">${renderSlots(s)}</div>
-        </div>
-      </div>`).join("");
-    box.innerHTML = `
-      <div class="panel fade-in">
-        <div class="result-head">
-          <div class="q"><span>指令:</span>${esc(data.instruction)}</div>${meta}
-        </div>
-        <div class="steps">${steps}</div>
-      </div>`;
-  } else {
-    const isWarn = data.status === "ambiguous";
-    const title = isWarn ? "指令不明确" : (data.status === "infeasible" ? "无法完成" : "出错了");
-    const cls = isWarn ? "warn" : "bad";
-    const icon = isWarn ? "⚠" : "✕";
-    box.innerHTML = `
-      <div class="panel fade-in">
-        <div class="result-head">
-          <div class="q"><span>指令:</span>${esc(data.instruction || $("#instruction").value)}</div>${meta}
-        </div>
-        <div class="banner ${cls}">
-          <span class="icon">${icon}</span>
-          <div><strong>${title}</strong>${esc(data.reason)}</div>
-        </div>
-      </div>`;
-  }
-}
-
-async function submit() {
-  const instruction = $("#instruction").value.trim();
-  if (!instruction) { $("#instruction").focus(); return; }
-  const btn = $("#submit");
-  btn.disabled = true; btn.classList.add("loading");
-  $("#submitText").textContent = "拆解中";
-  const t0 = performance.now();
-  try {
-    const res = await fetch("/api/decompose", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction, provider }),
-    });
-    const data = await res.json();
-    render(data, performance.now() - t0);
-  } catch (e) {
-    render({ status: "error", reason: "请求失败: " + e.message, instruction }, performance.now() - t0);
-  } finally {
-    btn.disabled = false; btn.classList.remove("loading");
-    $("#submitText").textContent = "拆解";
-  }
-}
-
-function opCard(op, isExpert) {
-  const logics = op.logics.map((l) => `
-    <div class="logic">
-      <span class="ln">logic${l.n}</span>
-      <span class="lzh">${esc(l.zh)}</span><br>
-      <span class="len2">${esc(l.en)}</span>
-    </div>`).join("");
-
-  let coefs = "";
-  for (const [name, v] of Object.entries(op.coefs || {})) {
-    const pairs = v.en.map((en, i) => `<span class="tag">${esc(en)} / ${esc(v.zh[i] || "")}</span>`).join("");
-    coefs += `<div class="coef">coef_${esc(name)}: ${pairs}</div>`;
-  }
-
-  let cats = "";
-  for (const [slot, objs] of Object.entries(op.categories || {})) {
-    cats += `<div class="cats">${esc(slot)}: ${objs.map((o) => `<span class="tag">${esc(o)}</span>`).join("")}</div>`;
-  }
-
-  const len = op.typical_length != null ? `<span class="len">典型长度 ${esc(op.typical_length)}</span>` : "";
-  return `
-    <div class="op-card${isExpert ? " expert" : ""}">
-      <div class="head">
-        <span class="oid">${esc(op.id)}</span>
-        <span class="zh-name">${esc(op.zh)}</span>
-        <span class="en-name">${esc(op.en)}</span>
-        ${len}
-      </div>
-      ${logics}${coefs}${cats}
-    </div>`;
-}
-
-async function loadOperations() {
-  try {
-    const res = await fetch("/api/operations");
-    const data = await res.json();
-    $("#ops").innerHTML = `
-      <div class="ops-head">
-        <h2>原子操作</h2><span class="count">${data.atomic.length}</span>
-        <span class="sub">拆解结果只会由这些操作组成</span>
-      </div>
-      <div class="ops-grid">${data.atomic.map((o) => opCard(o, false)).join("")}</div>
-      <div class="ops-head">
-        <h2>专家操作</h2><span class="count">${data.expert.length}</span>
-        <span class="sub">完整的长序列技能,不再拆分为原子操作</span>
-      </div>
-      <div class="ops-grid">${data.expert.map((o) => opCard(o, true)).join("")}</div>`;
-  } catch (e) { /* 操作库加载失败不影响拆解功能 */ }
-}
-
-$("#submit").onclick = submit;
-$("#instruction").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
-document.querySelectorAll(".chip").forEach((c) => {
-  c.onclick = () => { $("#instruction").value = c.dataset.i; submit(); };
-});
-initProviders();
-loadOperations();
-</script>
+<script src="/app.js"></script>
 </body>
 </html>
