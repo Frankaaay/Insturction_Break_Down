@@ -26,6 +26,10 @@ const EVENT_LABELS = {
   "attempt.failed": "Monitor 回报失败",
   "attempt.timed_out": "Monitor 等待超时",
   "report.rejected": "拒绝过期的 Monitor 回报",
+  "workflow.claimed": "GraspArm Agent 已领取任务",
+  "workflow.node.updated": "GraspArm 内部步骤更新",
+  "workflow.agent.stale": "GraspArm Agent 心跳中断",
+  "workflow.agent.replaced": "GraspArm Agent 进程已更换，自动恢复被拒绝",
 };
 
 function esc(value) {
@@ -152,6 +156,51 @@ function attemptChips(step) {
   return `<div class="attempts">${chips}</div>`;
 }
 
+function workflowForStep(step) {
+  const attempts = step.attempts || [];
+  const attempt = [...attempts].reverse().find(
+    (item) => item.workflow || item.workflow_preview
+  );
+  return attempt?.workflow || attempt?.workflow_preview || null;
+}
+
+function workflowStateLabel(state) {
+  return {
+    pending: "等待", starting: "启动中", running: "运行中",
+    waiting_input: "等待选择", passed: "通过", failed: "失败",
+    blocked: "已阻断", cancelled: "已取消",
+    registered: "等待 Agent", succeeded: "成功",
+    needs_operator: "需要人工处理",
+  }[state] || state;
+}
+
+function renderWorkflow(step) {
+  const workflow = workflowForStep(step);
+  if (!workflow) return "";
+  const nodes = workflow.nodes || [];
+  return `<div class="workflow-panel">
+    <div class="workflow-head">
+      <b>${esc(workflow.label || workflow.workflow_id || "Robot workflow")} · ${esc(workflow.version)}</b>
+      <span class="workflow-run ${esc(workflow.state)}">${esc(workflowStateLabel(workflow.state))}</span>
+    </div>
+    ${workflow.message ? `<div class="workflow-message">${esc(workflow.message)}</div>` : ""}
+    <div class="workflow-nodes">${nodes.map((node) => `
+      <div class="workflow-node ${esc(node.state)}">
+        <span class="workflow-dot"></span>
+        <div class="workflow-copy">
+          <div><b>${esc(node.label)}</b><em>${esc(node.type || "command")}</em><span>${esc(workflowStateLabel(node.state))}</span>
+            ${node.service_health ? `<em class="service-health ${esc(node.service_health)}">${esc(node.service_health)}</em>` : ""}
+          </div>
+          ${node.description ? `<small>${esc(node.description)}</small>` : ""}
+          ${node.start_after ? `<small>触发条件：${esc(node.start_after.node_id)} 输出 ${esc(node.start_after.marker)}</small>` : ""}
+          ${node.message ? `<p>${esc(node.message)}</p>` : ""}
+          ${node.exit_code != null ? `<small>exit=${esc(node.exit_code)}${node.marker ? ` · ${esc(node.marker)}` : ""}</small>` : ""}
+          ${node.log_tail ? `<pre>${esc(node.log_tail)}</pre>` : ""}
+        </div>
+      </div>`).join("")}</div>
+  </div>`;
+}
+
 function renderStep(step) {
   const icon = step.status === "succeeded" ? "✓" : (step.status === "blocked" ? "!" : step.index + 1);
   return `<div class="execution-step ${esc(step.status)}">
@@ -161,6 +210,7 @@ function renderStep(step) {
       <div class="step-en">${esc(step.en)}</div>
       <div class="step-tags">${renderSlots(step)}</div>
       ${attemptChips(step)}
+      ${renderWorkflow(step)}
     </div>
   </div>`;
 }
@@ -174,7 +224,7 @@ function monitorControls() {
   if (execution.state === "ready") {
     return `<div class="monitor-kicker">Plan review</div>
       <div class="monitor-action">计划等待确认</div>
-      <div class="monitor-sub">启动后，第一步将进入 ${esc(execution.timeout_seconds)} 秒 Monitor 窗口。</div>
+      <div class="monitor-sub">启动后，后端将等待对应 Monitor 或机器人 Agent 领取当前原子操作。</div>
       <div class="monitor-buttons">
         <button class="control-btn primary" data-action="start" ${commandBusy ? "disabled" : ""}>开始执行</button>
         <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>放弃计划</button>
@@ -184,6 +234,23 @@ function monitorControls() {
   const step = currentStep();
   if (execution.state === "running" && step && execution.active_attempt) {
     const attempt = execution.active_attempt;
+    const workflow = attempt.workflow || attempt.workflow_preview;
+    if (workflow) {
+      const waiting = workflow.state === "waiting_input";
+      const registered = workflow.state === "registered";
+      return `<div class="monitor-kicker">GraspArm Agent · Attempt ${attempt.attempt_no}</div>
+        <div class="agent-state ${waiting || registered ? "waiting" : "running"}">${waiting || registered ? "⌁" : "●"}</div>
+        <div class="monitor-action">${registered ? "等待 arm Agent 领取" : waiting ? "等待现场操作" : "机器人流程执行中"}</div>
+        <div class="monitor-sub">${registered
+          ? "Agent 已注册当前 YAML；开启执行权限后将按依赖关系领取并运行。"
+          : waiting
+            ? esc(workflow.message || "请按当前节点提示完成现场操作。")
+            : `Run ${esc((workflow.run_id || "").slice(0, 8))} · Agent 正在按依赖关系推进内部步骤。`}</div>
+        <div class="monitor-buttons">
+          <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止后续调度</button>
+        </div>
+        <div class="monitor-note">网页终止不是物理急停；异常运动必须使用现场急停。</div>`;
+    }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>
       <div class="monitor-action">${esc(step.zh)}</div>
@@ -200,7 +267,7 @@ function monitorControls() {
   if (execution.state === "paused") {
     return `<div class="monitor-kicker">Human intervention required</div>
       <div class="monitor-action">当前步骤已阻塞</div>
-      <div class="monitor-sub">自动尝试已耗尽。可以再给当前步骤一次机会，或安全终止整条任务。</div>
+      <div class="monitor-sub">当前操作失败或监控中断。可以显式重试当前步骤，或安全终止整条任务。</div>
       <div class="monitor-buttons">
         <button class="control-btn primary" data-action="retry" ${commandBusy ? "disabled" : ""}>重试当前步骤</button>
         <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
@@ -331,18 +398,28 @@ async function submitExecution() {
   }
 }
 
-async function postControl(suffix, body = null) {
+async function postControl(suffix, body = null, tokenRetry = false) {
   if (!execution || commandBusy) return;
   commandBusy = true;
   renderExecution();
   updateInputLock();
   try {
     const options = { method: "POST", headers: {} };
+    const operatorToken = localStorage.getItem("operatorToken");
+    if (operatorToken) options.headers["X-Operator-Token"] = operatorToken;
     if (body) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
     }
     const response = await fetch(`/api/executions/${execution.execution_id}/${suffix}`, options);
+    if (response.status === 401 && !tokenRetry) {
+      commandBusy = false;
+      const token = prompt("请输入 Operator Token（仅保存在当前浏览器）");
+      if (token) {
+        localStorage.setItem("operatorToken", token);
+        return postControl(suffix, body, true);
+      }
+    }
     const data = await parseResponse(response);
     commandBusy = false;
     if (data.execution) applyExecution(data.execution);

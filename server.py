@@ -14,11 +14,13 @@
 """
 
 import asyncio
+import hmac
 import json
+import os
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +54,64 @@ class MonitorReportRequest(BaseModel):
     outcome: Literal["success", "failure"]
     source: Literal["human", "robot"]
     detail: str | None = Field(default=None, max_length=2000)
+
+
+class AgentClaimRequest(BaseModel):
+    robot_id: str = Field(min_length=1, max_length=128)
+    agent_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class WorkflowRegisterRequest(BaseModel):
+    robot_id: str = Field(min_length=1, max_length=128)
+    agent_instance_id: str = Field(min_length=1, max_length=128)
+    workflow: dict
+
+
+class AgentHeartbeatRequest(BaseModel):
+    execution_id: str = Field(min_length=1, max_length=128)
+    attempt_id: str = Field(min_length=1, max_length=128)
+    run_id: str = Field(min_length=1, max_length=128)
+    robot_id: str = Field(min_length=1, max_length=128)
+
+
+class WorkflowEventRequest(AgentHeartbeatRequest):
+    event_id: str = Field(min_length=1, max_length=128)
+    sequence: int = Field(gt=0)
+    node_id: str = Field(min_length=1, max_length=128)
+    state: Literal[
+        "pending", "starting", "running", "waiting_input",
+        "passed", "failed", "blocked", "cancelled",
+    ]
+    exit_code: int | None = None
+    marker: str | None = Field(default=None, max_length=256)
+    message: str | None = Field(default=None, max_length=4000)
+    log_tail: str | None = Field(default=None, max_length=65536)
+    service_health: Literal["healthy", "stale", "exited"] | None = None
+
+
+class WorkflowCompleteRequest(AgentHeartbeatRequest):
+    completion_id: str = Field(min_length=1, max_length=128)
+    outcome: Literal["succeeded", "failed", "needs_operator"]
+    message: str | None = Field(default=None, max_length=4000)
+
+
+def _require_token(config_name: str, supplied: str | None, prefix: str = "") -> None:
+    expected = os.getenv(config_name, "")
+    if not expected:
+        return
+    candidate = supplied or ""
+    if prefix and candidate.startswith(prefix):
+        candidate = candidate[len(prefix):]
+    if not hmac.compare_digest(candidate, expected):
+        raise HTTPException(status_code=401, detail="认证失败")
+
+
+def _require_operator(supplied: str | None) -> None:
+    _require_token("OPERATOR_TOKEN", supplied)
+
+
+def _require_agent(authorization: str | None) -> None:
+    _require_token("GRASPARM_AGENT_TOKEN", authorization, "Bearer ")
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -113,7 +173,11 @@ async def get_execution(execution_id: str) -> dict:
 
 
 @app.post("/api/executions/{execution_id}/start")
-async def start_execution(execution_id: str) -> dict:
+async def start_execution(
+    execution_id: str,
+    x_operator_token: str | None = Header(default=None),
+) -> dict:
+    _require_operator(x_operator_token)
     try:
         return {"execution": await execution_manager.start(execution_id)}
     except (ExecutionNotFoundError, ExecutionConflictError) as exc:
@@ -121,7 +185,16 @@ async def start_execution(execution_id: str) -> dict:
 
 
 @app.post("/api/executions/{execution_id}/reports")
-async def report_execution(execution_id: str, req: MonitorReportRequest) -> dict:
+async def report_execution(
+    execution_id: str,
+    req: MonitorReportRequest,
+    x_operator_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    if req.source == "human":
+        _require_operator(x_operator_token)
+    else:
+        _require_agent(authorization)
     try:
         return await execution_manager.report(
             execution_id,
@@ -137,7 +210,11 @@ async def report_execution(execution_id: str, req: MonitorReportRequest) -> dict
 
 
 @app.post("/api/executions/{execution_id}/retry")
-async def retry_execution(execution_id: str) -> dict:
+async def retry_execution(
+    execution_id: str,
+    x_operator_token: str | None = Header(default=None),
+) -> dict:
+    _require_operator(x_operator_token)
     try:
         return {"execution": await execution_manager.retry(execution_id)}
     except (ExecutionNotFoundError, ExecutionConflictError) as exc:
@@ -145,9 +222,107 @@ async def retry_execution(execution_id: str) -> dict:
 
 
 @app.post("/api/executions/{execution_id}/terminate")
-async def terminate_execution(execution_id: str) -> dict:
+async def terminate_execution(
+    execution_id: str,
+    x_operator_token: str | None = Header(default=None),
+) -> dict:
+    _require_operator(x_operator_token)
     try:
         return {"execution": await execution_manager.terminate(execution_id)}
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/agent/claim")
+async def claim_agent_work(
+    req: AgentClaimRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_agent(authorization)
+    return {
+        "assignment": await execution_manager.claim_pick(
+            req.robot_id,
+            req.agent_instance_id,
+        )
+    }
+
+
+@app.post("/api/agent/workflows/register")
+async def register_agent_workflow(
+    req: WorkflowRegisterRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_agent(authorization)
+    try:
+        workflow = await execution_manager.register_workflow(
+            robot_id=req.robot_id,
+            agent_instance_id=req.agent_instance_id,
+            workflow=req.workflow,
+        )
+        return {"accepted": True, "workflow": workflow}
+    except ExecutionConflictError as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/agent/heartbeat")
+async def heartbeat_agent(
+    req: AgentHeartbeatRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_agent(authorization)
+    try:
+        return await execution_manager.heartbeat(
+            req.execution_id,
+            attempt_id=req.attempt_id,
+            run_id=req.run_id,
+            robot_id=req.robot_id,
+        )
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/agent/events")
+async def report_workflow_event(
+    req: WorkflowEventRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_agent(authorization)
+    try:
+        return await execution_manager.workflow_event(
+            req.execution_id,
+            event_id=req.event_id,
+            attempt_id=req.attempt_id,
+            run_id=req.run_id,
+            robot_id=req.robot_id,
+            sequence=req.sequence,
+            node_id=req.node_id,
+            state=req.state,
+            exit_code=req.exit_code,
+            marker=req.marker,
+            message=req.message,
+            log_tail=req.log_tail,
+            service_health=req.service_health,
+        )
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/agent/complete")
+async def complete_agent_workflow(
+    req: WorkflowCompleteRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_agent(authorization)
+    try:
+        return await execution_manager.complete_workflow(
+            req.execution_id,
+            completion_id=req.completion_id,
+            attempt_id=req.attempt_id,
+            run_id=req.run_id,
+            robot_id=req.robot_id,
+            outcome=req.outcome,
+            message=req.message,
+        )
     except (ExecutionNotFoundError, ExecutionConflictError) as exc:
         raise _http_error(exc) from exc
 
@@ -186,6 +361,11 @@ async def execution_events(execution_id: str) -> StreamingResponse:
 @app.on_event("shutdown")
 async def close_execution_manager() -> None:
     await execution_manager.close()
+
+
+@app.on_event("startup")
+async def resume_execution_timers() -> None:
+    await execution_manager.resume_timers()
 
 
 # 放在 API 路由之后,兜底提供前端页面

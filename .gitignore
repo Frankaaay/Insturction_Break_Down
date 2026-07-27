@@ -3,6 +3,8 @@
 
 # Python
 __pycache__/
+.playwright-cli/
+data/
 *.py[cod]
 *.egg-info/
 .venv/
