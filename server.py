@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""指令拆解 Web 服务。
+"""Planner Monitor Web 服务。
 
     python server.py                      # 监听 0.0.0.0:8000
     uvicorn server:app --host 0.0.0.0     # 或用 uvicorn 直接起
@@ -35,7 +35,7 @@ from execution import (
 from primitives import load_atomic_catalog, load_expert_catalog
 from providers import PROVIDERS
 
-app = FastAPI(title="指令拆解 Instruction Break-Down")
+app = FastAPI(title="Planner Monitor")
 execution_manager = ExecutionManager()
 
 STATIC_DIR = Path(__file__).parent / "static"

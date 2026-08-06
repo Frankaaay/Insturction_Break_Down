@@ -1,6 +1,10 @@
-# Instruction Break-Down 指令拆解
+# Planner Monitor
 
-把自然语言指令拆解为机器人可执行的**原子操作序列**。输入「把水壶放到桌子上」,输出:
+将自然语言 Planner、后端执行编排器和视觉 Monitor 实验代码统一到一个仓库。
+当前线上功能把自然语言指令拆解为机器人可执行的**原子操作序列**；`monitor/`
+保存后续接入执行闭环的视觉理解脚本、Prompt 和设计文档。
+
+输入「把水壶放到桌子上」,Planner 输出:
 
 ```
 1. [A_001 Pick/logic0]   拿起水壶。        (Pick up the kettle.)
@@ -19,6 +23,7 @@
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
 - **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
+- **Visual Monitor Lab**:`monitor/` 独立保存视觉监控实验代码和依赖；本阶段尚未接入网站执行状态机
 
 ## 快速开始
 
@@ -121,6 +126,7 @@ $ python decompose.py "把苹果切成两半"
 | `providers.py` | 提供商注册表:base_url / 默认模型 / key 环境变量,新增提供商加一行 |
 | `primitives.py` | 解析 action primitives 文件,校验 LLM 输出 |
 | `action primitives` | 原子操作定义(唯一数据源) |
+| `monitor/` | Visual Monitor Lab：视频/图像理解脚本、Prompt、设计文档与独立依赖 |
 
 ## 配置
 
