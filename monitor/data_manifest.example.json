@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "pick_red_cup_success",
+      "video": "videos/pick_red_cup_success.mp4",
+      "atomic_action": "拿起红色杯子",
+      "object": "红色杯子",
+      "target": "离开桌面并稳定保持在手中",
+      "initial_state": "红色杯子放在桌面上，手尚未接触杯子",
+      "success_criteria": [
+        "红色杯子明显离开桌面",
+        "红色杯子由手稳定保持"
+      ],
+      "timeout_s": 20,
+      "expected_completion_time_s": 11.5,
+      "checkpoints": [
+        {
+          "time_s": 4,
+          "expected_status": "in_progress"
+        },
+        {
+          "time_s": 8,
+          "expected_status": "in_progress"
+        },
+        {
+          "time_s": 12,
+          "expected_status": "succeeded"
+        }
+      ]
+    },
+    {
+      "id": "pick_wrong_object_failure",
+      "video": "videos/pick_wrong_object_failure.mp4",
+      "atomic_action": "拿起红色杯子",
+      "object": "红色杯子",
+      "target": "离开桌面并稳定保持在手中",
+      "initial_state": "红色杯子和蓝色杯子都放在桌面上",
+      "success_criteria": [
+        "红色杯子明显离开桌面",
+        "红色杯子由手稳定保持"
+      ],
+      "timeout_s": 20,
+      "checkpoints": [
+        {
+          "time_s": 4,
+          "expected_status": "in_progress"
+        },
+        {
+          "time_s": 8,
+          "expected_status": "failed",
+          "expected_failure_reason": "实际拿起的是蓝色杯子而不是红色杯子"
+        }
+      ]
+    },
+    {
+      "id": "pick_drop_then_retry",
+      "video": "videos/pick_drop_then_retry.mp4",
+      "atomic_action": "拿起红色杯子",
+      "object": "红色杯子",
+      "target": "离开桌面并稳定保持在手中",
+      "initial_state": "红色杯子放在桌面上",
+      "success_criteria": [
+        "红色杯子明显离开桌面",
+        "红色杯子由手稳定保持"
+      ],
+      "timeout_s": 20,
+      "checkpoints": [
+        {
+          "time_s": 4,
+          "expected_status": "in_progress"
+        },
+        {
+          "time_s": 8,
+          "expected_status": "in_progress",
+          "recoverable_event": true
+        },
+        {
+          "time_s": 12,
+          "expected_status": "succeeded"
+        }
+      ]
+    }
+  ]
+}

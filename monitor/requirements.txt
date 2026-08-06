@@ -1,3 +1,4 @@
 Pillow==12.3.0
 flatbuffers==25.12.19
 mcap==1.4.0
+imageio-ffmpeg==0.6.0

@@ -22,6 +22,88 @@ Prototype for testing whether a vision-language model can monitor short robot
 manipulation clips and decide whether an atomic operation is on track,
 successful, risky, or failed.
 
+## Recorded Video Monitor Benchmark
+
+The current local-video benchmark is separate from the older MCAP experiments.
+It simulates a causal monitor over ordinary MP4/MOV recordings: checkpoints are
+created every 4 seconds plus at the exact end of the video, and no request can
+see footage after its checkpoint.
+
+Put local recordings in:
+
+```text
+data/recorded_samples/
+```
+
+That directory contains recording and naming guidance for the first kettle-pick
+samples. Videos and the real `manifest.json` are ignored by Git. Copy
+`data_manifest.example.json` to `data/recorded_samples/manifest.json`, then edit
+the operation, object, success criteria, and optional checkpoint truth labels.
+
+Run the offline preflight first. It performs actual FFmpeg extraction/transcoding,
+checks payload sizes, and writes artifacts, but does not call a model API:
+
+```powershell
+python scripts/run_recorded_video_monitor.py --dry-run
+```
+
+The recorded-video benchmark defaults to Alibaba Cloud Model Studio's Beijing
+OpenAI-compatible endpoint. Put the key in the repository root `.env`, which is
+ignored by Git:
+
+```dotenv
+DASHSCOPE_API_KEY=sk-...
+```
+
+The current benchmark contract sends native video only. Its default model is
+`qwen3.7-plus`, with thinking disabled and structured output:
+
+```powershell
+python scripts/run_recorded_video_monitor.py `
+  --provider bailian `
+  --model qwen3.7-plus `
+  --strategy native_video `
+  --reasoning-effort none
+```
+
+The default endpoint is
+`https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`. Use
+`--endpoint-url` only for a different region or a workspace-specific endpoint.
+
+You can repeat `--model` and `--case` to select an explicit matrix.
+`--all-models` also includes `qwen3.6-plus`, `stepfun/step-3.7-flash`, and
+`qwen3.5-omni-plus`. Use a small canary before a paid sweep. The active strategy is:
+
+- `native_video`: BEFORE plus a 4-second rolling H.264 window extended one
+  second backwards so adjacent 4-second checks overlap.
+
+`frame_packet` remains available only when passed explicitly, so earlier
+artifacts can be reproduced; it is not part of the current experiment matrix.
+
+Results are written under `artifacts/recorded_monitor/<timestamp>/`:
+
+- `run_manifest.json`: exact prompt/config/model provenance;
+- `records.json`: per-request preprocessing, first-byte, response, validation,
+  truth, retry, size, token, and completion-image evidence;
+- `summary.json`: P50/P95 latency, status metrics, and acceptance gates;
+- `completion_evidence/`: frames extracted only for valid `succeeded` results.
+
+The SLA metric is `evidence_to_result_seconds`: Base64 payload construction,
+network/model time, JSON validation, and completion-frame extraction after the
+checkpoint evidence is ready. FFmpeg preparation is reported separately and is
+also included in `wall_total_seconds`. A result obtained after retry is always
+marked ineligible for the real-time SLA.
+
+The output contract intentionally contains only `status`, Chinese description,
+free-text `failure_reason`, timestamped visual evidence, and an optional
+completion-evidence timestamp. It contains no control decision, recoverability,
+reason-code, or confidence field.
+
+The active prompt is `prompts/recorded_video_monitor_v2_zh.md`. V2 makes two
+status boundaries explicit: acting on a visibly different object while the
+target remains untouched is `failed`, and an occluded success predicate is
+`unknown`. V1 is retained for reproducible A/B comparison.
+
 ## Data
 
 The current `data/` directory contains episode zip files. Each zip includes:
