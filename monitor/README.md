@@ -1,0 +1,205 @@
+# Visual Monitor Lab
+
+This directory is the curated source import from
+`Frankaaay/Robot-Failure-Detector` at commit
+`51c28a7a7b1eb470861d9eec7c72516b89a0cc55`, including the source and prompt
+work that was present in its local working tree at import time.
+
+It is the experimental visual-monitoring area of the Planner Monitor
+repository. Run the examples from this directory so paths such as `scripts/`,
+`prompts/`, `data/`, and `artifacts/` resolve locally. Runtime data, model
+outputs, logs, credentials, temporary files, and source PDFs are intentionally
+not imported or tracked.
+
+Install its optional dependencies separately from the web service:
+
+```powershell
+python -m pip install -r monitor/requirements.txt
+Set-Location monitor
+```
+
+Prototype for testing whether a vision-language model can monitor short robot
+manipulation clips and decide whether an atomic operation is on track,
+successful, risky, or failed.
+
+## Data
+
+The current `data/` directory contains episode zip files. Each zip includes:
+
+- `episode.mcap`
+- `frames/manifest.json`
+- `frames/head_right/*.jpg`
+- `frames/left_wrist_left/*.jpg`
+- `frames/right_wrist_right/*.jpg`
+
+Each current episode has 3 camera lanes and 8 sampled frames per lane.
+
+Supported operation folders can use either codes, English names, or local
+aliases. Examples: `A_001`, `Pick`, and `pickup` are all normalized to `pick`.
+
+| Code | Operation | Chinese |
+| --- | --- | --- |
+| `A_001` | `pick` | 拿起 |
+| `A_002` | `place` | 放下 |
+| `A_003` | `carry` | 搬运 |
+| `A_004` | `pull` | 拉 |
+| `A_005` | `push` | 推 |
+| `A_006` | `hang` | 挂 |
+| `A_007` | `pour` | 倒液体 |
+| `A_008` | `press_button` | 按按钮 |
+| `A_009` | `wipe` | 擦拭 |
+| `A_010` | `insert` | 插入 |
+| `A_011` | `rotate` | 旋转 |
+| `A_012` | `scoop` | 舀 |
+| `A_013` | `stir` | 搅拌 |
+| `A_014` | `cut` | 切 |
+| `A_015` | `turn` | 翻转 |
+| `A_016` | `swipe` | 刷卡 |
+| `A_017` | `stamp` | 盖章 |
+| `A_018` | `sweep` | 清扫 |
+
+Inspect the dataset:
+
+```powershell
+python scripts/inspect_dataset.py --data-dir data
+```
+
+Generate a contact sheet for visual inspection:
+
+```powershell
+python scripts/inspect_dataset.py --contact-sheet --zip data/18715953aecf4ce50e14b44bd7f913a5.zip --output artifacts/sample_contact_sheet.jpg
+```
+
+## Detector Prompt
+
+The first prompt and output contract live in:
+
+```text
+prompts/atomic_pick_detector.md
+```
+
+The detector returns one JSON object with:
+
+- `status`: `needs_more_observation`, `in_progress`, `at_risk`, `failed`, or `succeeded`
+- `success_probability`
+- `failure_probability`
+- `progress`
+- `should_intervene`
+- `intervention_level`
+- visual `evidence`
+- `risk_factors`
+- `next_check`
+- `confidence`
+
+## OpenRouter Test
+
+Set your key outside the repo:
+
+```powershell
+$env:OPENROUTER_API_KEY="sk-or-..."
+```
+
+Or paste it into local `local_config.py`:
+
+```python
+OPENROUTER_API_KEY = "sk-or-..."
+```
+
+The scripts also read `OPENROUTER_API_KEY=...` from a local `.env` file, which is
+ignored by git.
+
+Dry run the payload without sending:
+
+```powershell
+python scripts/run_openrouter_detection.py --zip data/18715953aecf4ce50e14b44bd7f913a5.zip --strategy timeline_sheet --current-index 7 --dry-run
+```
+
+Call OpenRouter:
+
+```powershell
+python scripts/run_openrouter_detection.py --zip data/18715953aecf4ce50e14b44bd7f913a5.zip --strategy timeline_sheet --current-index 7 --output artifacts/result.json
+```
+
+Run a per-frame/model sweep:
+
+```powershell
+python scripts/run_openrouter_sweep.py --data-dir data --models qwen/qwen3-vl-32b-instruct --indices all --strategies current,start_current,timeline_sheet --output-dir artifacts/qwen_all_ops
+```
+
+The sweep prints a progress bar with elapsed time, ETA, and per-request latency.
+
+If a model does not support strict JSON schema output, add:
+
+```powershell
+--no-json-schema
+```
+
+Sampling strategies:
+
+- `current`: current frame from all camera lanes
+- `start_current`: first frame plus current frame from all camera lanes
+- `history_sparse`: sparse history frames from all camera lanes
+- `timeline_sheet`: sparse history compressed into one labeled image
+
+Analyze a sweep:
+
+```powershell
+python scripts/analyze_sweep.py --input-dir artifacts/qwen_all_ops
+```
+
+The report includes `overall_score`, `final_success_rate`, final
+`success_probability`, final `progress`, `no_false_intervention_rate`,
+`smoothness_score`, and `avg_elapsed_seconds`. Request latency is reported as an
+average but is not included in `overall_score`.
+
+## Qwen3.8-Max Blind Native-Video Test
+
+The open-ended native-video test is intentionally separate from the detector
+sweep above. It sends only the continuous `head_right` video extracted from each
+`episode.mcap`; it does not send task text, an operation list, success/failure
+labels, or files from a `frames/` directory.
+
+The prompt is:
+
+```text
+prompts/umi_open_video_understanding_v15_zh.md
+```
+
+Run the no-cost preflight first. It extracts/remuxes the MCAP H.264 stream,
+checks that OpenRouter advertises video input for the requested model, and
+calculates the Base64 request size without calling the model:
+
+```powershell
+python scripts/run_openrouter_qwen38_native_video.py --dry-run
+```
+
+The default suite is fail-closed and contains 14 cases: one fixed MCAP case for
+each of 10 operation folders (`carry`, `drop`, `hang`, `pickup`, `pour_liquid`,
+`press_button`, `pull`, `push`, `stir`, and `wipe`) plus `fail1` through
+`fail4`. The `place` folder is intentionally excluded from this experiment.
+For local adapter testing while one of those 14 cases is missing, use
+`--allow-incomplete`; do not treat that as the complete experiment.
+
+After preflight succeeds, run the fixed suite with:
+
+```powershell
+python scripts/run_openrouter_qwen38_native_video.py
+```
+
+To make one paid canary call before the full batch, select the exact local case
+identifier printed by the dry run:
+
+```powershell
+python scripts/run_openrouter_qwen38_native_video.py --case stir__8d3686750ff6c506bdd2526a7214a3f6
+```
+
+The runner transcodes every head-right stream with one uniform video contract:
+source 640x480 resolution, 15 FPS, H.264 CRF 26, and no audio. It stops before
+an API request if the MP4 exceeds 5.5 MB or the estimated Base64 request exceeds
+8 MB. It does not silently fall back to sampled frames or change compression
+again when a case exceeds those limits.
+
+Qwen3.8-Max defaults to very high reasoning effort. This runner explicitly uses
+`--reasoning-effort low` and `--max-tokens 5000` so a short visual-description
+request retains enough budget for the final answer. Both values can be
+overridden from the command line.

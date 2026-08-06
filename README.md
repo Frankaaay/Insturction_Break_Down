@@ -1,6 +1,10 @@
-# Instruction Break-Down 指令拆解
+# Planner Monitor
 
-把自然语言指令拆解为机器人可执行的**原子操作序列**。输入「把水壶放到桌子上」,输出:
+将自然语言 Planner、后端执行编排器和视觉 Monitor 实验代码统一到一个仓库。
+当前线上功能把自然语言指令拆解为机器人可执行的**原子操作序列**；`monitor/`
+保存后续接入执行闭环的视觉理解脚本、Prompt 和设计文档。
+
+输入「把水壶放到桌子上」,Planner 输出:
 
 ```
 1. [A_001 Pick/logic0]   拿起水壶。        (Pick up the kettle.)
@@ -17,7 +21,9 @@
 - **异常输入处理**:指令不明确(「放到那边」)→ 返回缺少什么信息;超出原子操作能力(「切成两半」)→ 返回无法完成的原因
 - **输出可校验**:LLM 输出 JSON 后经程序校验(action_id / logic 模板是否合法),不合法自动重试
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
+- **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
+- **Visual Monitor Lab**:`monitor/` 独立保存视觉监控实验代码和依赖；本阶段尚未接入网站执行状态机
 
 ## 快速开始
 
@@ -57,6 +63,11 @@ HTTP API(供其他程序调用):
 - `POST /api/executions/{id}/retry` — 暂停后再尝试当前步骤一次
 - `POST /api/executions/{id}/terminate` — 终止执行
 - `GET /api/executions/{id}/events` — SSE 执行事件流
+- `POST /api/agent/workflows/register` — arm Agent 注册脱敏后的 YAML workflow DAG
+- `POST /api/agent/claim` — arm Agent 主动领取当前 `A_001 Pick`
+- `POST /api/agent/heartbeat` — 保持机器人 workflow claim 存活
+- `POST /api/agent/events` — 幂等上报内部节点状态、退出码和有限日志
+- `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:
 
@@ -73,13 +84,22 @@ Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.start
 
 `report_id` 用于请求幂等;过期的 step/attempt 会返回 HTTP `409`,不会误推进任务。
 
-执行状态 v1 仅保存在当前 Python 进程内,因此必须使用单 worker:
+状态机定时器和 SSE 订阅仍由单个 Python 进程管理，因此即使启用 SQLite 也必须
+使用单 worker：
 
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-> 注意:服务重启会丢失执行会话;API 暂无鉴权,仅适合本机或受信网络。公网部署前需增加持久化、反向代理和访问控制。
+设置 `EXECUTION_DB_PATH` 后执行会话、Agent 注册的 workflow、每次 claim 的
+不可变 DAG 快照和幂等事件会保存到 SQLite WAL。没有配置时仍保持原来的纯内存
+开发模式。Agent YAML 是 workflow 的唯一权威；服务器只保存不含 shell 命令的
+注册描述，前端按节点数量、类型和依赖动态渲染。注册完成后，尚未 claim 的
+`A_001` attempt 也会显示 `等待 Agent` 的动态节点预览。
+
+系统不增加用户账号。公开部署时应设置 `OPERATOR_TOKEN` 和
+`GRASPARM_AGENT_TOKEN`:前者保护开始/重试/终止等控制操作,后者只供机器人
+Agent 上报。页面在服务返回 401 时询问 operator token,并仅保存在当前浏览器。
 
 ## 异常输入示例
 
@@ -106,6 +126,7 @@ $ python decompose.py "把苹果切成两半"
 | `providers.py` | 提供商注册表:base_url / 默认模型 / key 环境变量,新增提供商加一行 |
 | `primitives.py` | 解析 action primitives 文件,校验 LLM 输出 |
 | `action primitives` | 原子操作定义(唯一数据源) |
+| `monitor/` | Visual Monitor Lab：视频/图像理解脚本、Prompt、设计文档与独立依赖 |
 
 ## 配置
 
@@ -122,6 +143,9 @@ API key 通过环境变量或 `.env` 提供(见 `.env.example`):
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `MONITOR_TIMEOUT_SECONDS` | `20` | 当前原子操作等待 monitor 回报的服务端超时秒数 |
+| `EXECUTION_DB_PATH` | 空 | SQLite 持久化路径；空值保持内存模式 |
+| `OPERATOR_TOKEN` | 空 | 可选的网站控制 token |
+| `GRASPARM_AGENT_TOKEN` | 空 | 可选的 arm Agent Bearer token |
 
 `.env` 已在 `.gitignore` 中,不会被提交。
 

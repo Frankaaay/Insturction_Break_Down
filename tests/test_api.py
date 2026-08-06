@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -21,11 +22,62 @@ PLANNER_RESULT = {
     ],
 }
 
+WORKFLOW = {
+    "workflow_id": "grasparm.auto-pick",
+    "version": "3",
+    "digest": "c" * 64,
+    "capability_id": "A_001",
+    "label": "GraspArm Auto Pick",
+    "nodes": [
+        {
+            "node_id": "controller",
+            "label": "Controller",
+            "type": "service",
+            "host": "arm",
+            "depends_on": [],
+        },
+        {
+            "node_id": "reset",
+            "label": "Reset",
+            "type": "command",
+            "host": "arm",
+            "depends_on": ["controller"],
+        },
+        {
+            "node_id": "auto_pick",
+            "label": "Auto Pick",
+            "type": "motion",
+            "host": "arm",
+            "depends_on": ["reset"],
+        },
+        {
+            "node_id": "discover",
+            "label": "YOLOE Discover",
+            "type": "command",
+            "host": "arm",
+            "depends_on": ["reset"],
+            "start_after": {
+                "node_id": "auto_pick",
+                "marker": "Waiting for MosaicGrasp candidate",
+            },
+        },
+    ],
+}
+
 
 class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.environment = patch.dict(os.environ, {
+            "OPERATOR_TOKEN": "",
+            "GRASPARM_AGENT_TOKEN": "",
+            "EXECUTION_DB_PATH": "",
+        })
+        self.environment.start()
         self.previous_manager = server.execution_manager
-        server.execution_manager = ExecutionManager(timeout_seconds=1)
+        server.execution_manager = ExecutionManager(
+            timeout_seconds=1,
+            db_path="",
+        )
         transport = httpx.ASGITransport(app=server.app)
         self.client = httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -33,6 +85,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         await server.execution_manager.close()
         server.execution_manager = self.previous_manager
+        self.environment.stop()
 
     async def test_create_start_report_and_get(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):
@@ -104,6 +157,189 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ambiguous")
         self.assertNotIn("execution", response.json())
         self.assertEqual(legacy.json()["status"], "ambiguous")
+
+    async def register_agent(self, headers=None):
+        return await self.client.post(
+            "/api/agent/workflows/register",
+            json={
+                "robot_id": "x5-arm-grasp",
+                "agent_instance_id": "agent-1",
+                "workflow": WORKFLOW,
+            },
+            headers=headers,
+        )
+
+    async def test_agent_register_claim_complete_and_failure_are_visible(self):
+        registered = await self.register_agent()
+        self.assertEqual(registered.status_code, 200)
+        self.assertNotIn(
+            "command",
+            registered.json()["workflow"]["nodes"][0],
+        )
+        discover = next(
+            node
+            for node in registered.json()["workflow"]["nodes"]
+            if node["node_id"] == "discover"
+        )
+        self.assertEqual(
+            discover["start_after"]["node_id"],
+            "auto_pick",
+        )
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            execution = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子",
+                "provider": "deepseek",
+            })).json()["execution"]
+        execution = (await self.client.post(
+            f"/api/executions/{execution['execution_id']}/start"
+        )).json()["execution"]
+
+        assignment = (await self.client.post(
+            "/api/agent/claim",
+            json={
+                "robot_id": "x5-arm-grasp",
+                "agent_instance_id": "agent-1",
+            },
+        )).json()["assignment"]
+        self.assertEqual(assignment["attempt_id"], execution["active_attempt"]["attempt_id"])
+        self.assertEqual(assignment["workflow_digest"], "c" * 64)
+
+        base = {
+            "execution_id": execution["execution_id"],
+            "attempt_id": assignment["attempt_id"],
+            "run_id": assignment["run_id"],
+            "robot_id": "x5-arm-grasp",
+        }
+        response = await self.client.post("/api/agent/events", json={
+            **base,
+            "event_id": "event-1",
+            "sequence": 1,
+            "node_id": "controller",
+            "state": "passed",
+            "marker": "ARM_CONTROLLER_READY",
+        })
+        workflow = response.json()["execution"]["active_attempt"]["workflow"]
+        self.assertEqual(workflow["state"], "running")
+
+        response = await self.client.post("/api/agent/events", json={
+            **base,
+            "event_id": "event-2",
+            "sequence": 2,
+            "node_id": "reset",
+            "state": "failed",
+            "exit_code": 1,
+            "message": "ARM_READY_CHECK_FAILED",
+            "log_tail": "reset readiness timeout",
+        })
+        self.assertEqual(
+            response.json()["execution"]["active_attempt"]["workflow"]["state"],
+            "failed",
+        )
+        response = await self.client.post("/api/agent/complete", json={
+            **base,
+            "completion_id": "complete-1",
+            "outcome": "needs_operator",
+            "message": "physical state needs inspection",
+        })
+        self.assertEqual(response.json()["execution"]["state"], "paused")
+        node = next(
+            item
+            for item in response.json()["execution"]["steps"][0]["attempts"][0]["workflow"]["nodes"]
+            if item["node_id"] == "reset"
+        )
+        self.assertEqual(node["state"], "failed")
+        self.assertEqual(node["log_tail"], "reset readiness timeout")
+        self.assertEqual(
+            response.json()["execution"]["steps"][0]["attempts"][0]["workflow"]["state"],
+            "needs_operator",
+        )
+
+    async def test_dynamic_four_node_agent_success_completes_pick(self):
+        await self.register_agent()
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            execution = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子",
+                "provider": "deepseek",
+            })).json()["execution"]
+        execution = (await self.client.post(
+            f"/api/executions/{execution['execution_id']}/start"
+        )).json()["execution"]
+        assignment = (await self.client.post("/api/agent/claim", json={
+            "robot_id": "x5-arm-grasp",
+            "agent_instance_id": "agent-1",
+        })).json()["assignment"]
+        base = {
+            "execution_id": execution["execution_id"],
+            "attempt_id": assignment["attempt_id"],
+            "run_id": assignment["run_id"],
+            "robot_id": "x5-arm-grasp",
+        }
+        for sequence, (node_id, marker) in enumerate((
+            ("controller", "ARM_CONTROLLER_READY"),
+            ("reset", "RESET_COMPLETE"),
+            ("discover", "YOLOE_DISCOVER_COMPLETE"),
+            ("auto_pick", "AUTO_PICK_COMPLETE"),
+        ), start=1):
+            response = await self.client.post("/api/agent/events", json={
+                **base,
+                "event_id": f"pass-{sequence}",
+                "sequence": sequence,
+                "node_id": node_id,
+                "state": "passed",
+                "marker": marker,
+            })
+            self.assertEqual(response.status_code, 200)
+        response = await self.client.post("/api/agent/complete", json={
+            **base,
+            "completion_id": "success-complete",
+            "outcome": "succeeded",
+            "message": "all markers observed",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["execution"]["state"], "completed")
+
+    async def test_operator_and_agent_tokens_are_independent(self):
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            execution = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子",
+                "provider": "deepseek",
+            })).json()["execution"]
+        with patch.dict(
+            "os.environ",
+            {"OPERATOR_TOKEN": "operator-secret", "GRASPARM_AGENT_TOKEN": "agent-secret"},
+        ):
+            denied = await self.client.post(
+                f"/api/executions/{execution['execution_id']}/start"
+            )
+            self.assertEqual(denied.status_code, 401)
+            started = await self.client.post(
+                f"/api/executions/{execution['execution_id']}/start",
+                headers={"X-Operator-Token": "operator-secret"},
+            )
+            self.assertEqual(started.status_code, 200)
+
+            denied_claim = await self.client.post(
+                "/api/agent/claim",
+                json={
+                    "robot_id": "x5-arm-grasp",
+                    "agent_instance_id": "agent-1",
+                },
+                headers={"Authorization": "Bearer operator-secret"},
+            )
+            self.assertEqual(denied_claim.status_code, 401)
+            registered = await self.register_agent(
+                headers={"Authorization": "Bearer agent-secret"}
+            )
+            self.assertEqual(registered.status_code, 200)
+            claim = await self.client.post(
+                "/api/agent/claim",
+                json={
+                    "robot_id": "x5-arm-grasp",
+                    "agent_instance_id": "agent-1",
+                },
+                headers={"Authorization": "Bearer agent-secret"},
+            )
+            self.assertIsNotNone(claim.json()["assignment"])
 
 
 if __name__ == "__main__":

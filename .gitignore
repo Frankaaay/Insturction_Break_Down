@@ -3,10 +3,27 @@
 
 # Python
 __pycache__/
+.playwright-cli/
+data/
+artifacts/
+logs/
+tmp/
+local_config.py
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+
+# Local runtime state and media
+*.db
+*.db-shm
+*.db-wal
+*.mcap
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
 
 # IDE / 系统
 .vscode/
