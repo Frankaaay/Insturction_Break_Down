@@ -1,11 +1,15 @@
 import os
+import tempfile
+import asyncio
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
 import server
 from execution import ExecutionManager
+from realtime_monitor import VisualMonitorConfig, VisualMonitorService
 
 
 PLANNER_RESULT = {
@@ -97,6 +101,14 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         execution = response.json()["execution"]
         self.assertEqual(execution["state"], "ready")
 
+        response = await self.client.post(
+            f"/api/executions/{execution['execution_id']}/mode",
+            json={"mode": "visual_monitor"},
+        )
+        self.assertEqual(response.status_code, 200)
+        execution = response.json()["execution"]
+        self.assertEqual(execution["execution_mode"], "visual_monitor")
+
         response = await self.client.post(f"/api/executions/{execution['execution_id']}/start")
         execution = response.json()["execution"]
         self.assertEqual(execution["state"], "running")
@@ -116,6 +128,62 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
 
         response = await self.client.get(f"/api/executions/{execution['execution_id']}")
         self.assertEqual(response.json()["execution"]["progress"]["succeeded"], 1)
+
+    async def test_visual_monitor_upload_updates_snapshot_without_advancing(self):
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            created = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子", "provider": "deepseek",
+            })).json()["execution"]
+        await self.client.post(f"/api/executions/{created['execution_id']}/mode", json={"mode": "visual_monitor"})
+        started = (await self.client.post(f"/api/executions/{created['execution_id']}/start")).json()["execution"]
+        attempt_id = started["active_attempt"]["attempt_id"]
+        temporary = tempfile.TemporaryDirectory()
+        previous_service = server.visual_monitor
+        previous_baselines = server.visual_baselines
+        service = VisualMonitorService(
+            server._update_visual_execution,
+            VisualMonitorConfig(Path(temporary.name), max_concurrency=2),
+        )
+
+        async def fake_call(*args):
+            return ({
+                "status": "in_progress", "description_zh": "手正在接近杯子",
+                "failure_reason": None,
+                "evidence": [{"timestamp_s": 1.0, "observation": "手靠近杯子"}],
+                "completion_evidence_timestamp_s": None,
+            }, {"bailian_total": 12.0}, "qwen3.7-plus", "{}")
+
+        service._call_bailian = fake_call
+        server.visual_monitor = service
+        server.visual_baselines = {}
+        try:
+            claim = await self.client.post("/api/visual-monitor/claim", json={"camera_id": "cam-1"})
+            self.assertEqual(claim.status_code, 200)
+            baseline = await self.client.post("/api/visual-monitor/baseline", data={
+                "execution_id": created["execution_id"], "attempt_id": attempt_id,
+                "camera_id": "cam-1", "captured_at": "2026-08-06T00:00:00Z",
+            }, files={"image": ("before.jpg", b"jpeg", "image/jpeg")})
+            self.assertEqual(baseline.status_code, 200)
+            checkpoint = await self.client.post("/api/visual-monitor/checkpoints", data={
+                "execution_id": created["execution_id"], "attempt_id": attempt_id,
+                "camera_id": "cam-1", "sequence": "1",
+                "window_started_at": "2026-08-06T00:00:00Z",
+                "window_ended_at": "2026-08-06T00:00:07Z",
+                "capture_ms": "7000", "encode_ms": "80",
+            }, files={"video": ("window.mp4", b"mp4", "video/mp4")})
+            self.assertEqual(checkpoint.status_code, 202)
+            for _ in range(20):
+                if not service.in_flight:
+                    break
+                await asyncio.sleep(0.01)
+            snapshot = (await self.client.get(f"/api/executions/{created['execution_id']}")).json()["execution"]
+            self.assertEqual(snapshot["state"], "running")
+            self.assertEqual(snapshot["active_attempt"]["visual_monitor"]["latest"]["status"], "in_progress")
+        finally:
+            await service.close()
+            server.visual_monitor = previous_service
+            server.visual_baselines = previous_baselines
+            temporary.cleanup()
 
     async def test_stale_report_returns_409_and_missing_session_returns_404(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):

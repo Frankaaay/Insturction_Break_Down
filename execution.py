@@ -173,7 +173,10 @@ class ExecutionManager:
         provider: str,
         model: str | None,
         planner_steps: list[dict[str, Any]],
+        execution_mode: str = "robot_agent",
     ) -> dict[str, Any]:
+        if execution_mode not in {"robot_agent", "visual_monitor"}:
+            raise ExecutionConflictError("不支持的执行模式")
         execution_id = str(uuid4())
         created_at = _iso()
         steps = []
@@ -192,6 +195,7 @@ class ExecutionManager:
             "instruction": instruction,
             "provider": provider,
             "model": model,
+            "execution_mode": execution_mode,
             "state": "ready",
             "timeout_seconds": self.timeout_seconds,
             "max_auto_attempts": self.max_auto_attempts,
@@ -212,6 +216,93 @@ class ExecutionManager:
             "step_count": len(steps),
         })
         return self._snapshot_locked(execution)
+
+    async def set_mode(self, execution_id: str, mode: str) -> dict[str, Any]:
+        if mode not in {"robot_agent", "visual_monitor"}:
+            raise ExecutionConflictError("不支持的执行模式")
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            if execution["state"] != "ready":
+                raise ExecutionConflictError("只能在开始执行前切换执行模式")
+            execution["execution_mode"] = mode
+            self._record_event_locked(execution, "execution.mode.changed", {"mode": mode})
+            return self._snapshot_locked(execution)
+
+    async def claim_visual_monitor(self, camera_id: str) -> dict[str, Any] | None:
+        """Claim the oldest active visual-monitor Pick attempt."""
+        for execution_id in list(self._executions):
+            execution = self._executions[execution_id]
+            async with self._locks[execution_id]:
+                attempt = execution.get("active_attempt")
+                if (
+                    execution["state"] != "running"
+                    or execution.get("execution_mode", "robot_agent") != "visual_monitor"
+                    or not attempt
+                    or attempt["status"] != "waiting"
+                ):
+                    continue
+                step = self._current_step_locked(execution)
+                if step.get("action_id") != "A_001":
+                    continue
+                monitor = attempt.get("visual_monitor")
+                if monitor and monitor.get("camera_id") != camera_id:
+                    continue
+                if not monitor:
+                    attempt["visual_monitor"] = {
+                        "camera_id": camera_id,
+                        "state": "awaiting_baseline",
+                        "latest": None,
+                        "baseline_url": None,
+                        "claimed_at": _iso(),
+                    }
+                    self._record_event_locked(execution, "visual_monitor.claimed", {
+                        "step_id": step["step_id"],
+                        "attempt_id": attempt["attempt_id"],
+                        "camera_id": camera_id,
+                    })
+                return {
+                    "execution_id": execution_id,
+                    "step_id": step["step_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "action_id": step.get("action_id"),
+                    "action": step.get("action"),
+                    "zh": step.get("zh"),
+                    "slots": copy.deepcopy(step.get("slots", {})),
+                    "previous_status": ((attempt.get("visual_monitor") or {}).get("latest") or {}).get("status"),
+                }
+        return None
+
+    async def update_visual_monitor(
+        self,
+        execution_id: str,
+        *,
+        attempt_id: str,
+        camera_id: str,
+        patch: dict[str, Any],
+        event_type: str,
+    ) -> dict[str, Any]:
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            attempt = execution.get("active_attempt")
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "visual_monitor"
+                or not attempt
+                or attempt["attempt_id"] != attempt_id
+                or attempt["status"] != "waiting"
+            ):
+                raise ExecutionConflictError("Visual Monitor attempt 已过期")
+            monitor = attempt.get("visual_monitor")
+            if not monitor or monitor.get("camera_id") != camera_id:
+                raise ExecutionConflictError("Visual Monitor camera claim 不匹配")
+            monitor.update(copy.deepcopy(patch))
+            self._record_event_locked(execution, event_type, {
+                "step_id": self._current_step_locked(execution)["step_id"],
+                "attempt_id": attempt_id,
+                "camera_id": camera_id,
+                "status": (patch.get("latest") or {}).get("status"),
+            })
+            return self._snapshot_locked(execution)
 
     async def get(self, execution_id: str) -> dict[str, Any]:
         execution = self._require(execution_id)
@@ -238,7 +329,9 @@ class ExecutionManager:
                     continue
                 step = self._current_step_locked(execution)
                 timeout_seconds = (
-                    self.pick_claim_timeout_seconds
+                    float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120"))
+                    if execution.get("execution_mode") == "visual_monitor"
+                    else self.pick_claim_timeout_seconds
                     if step.get("action_id") == "A_001"
                     else execution["timeout_seconds"]
                 )
@@ -270,6 +363,7 @@ class ExecutionManager:
                 attempt = execution.get("active_attempt")
                 if (
                     execution["state"] == "running"
+                    and execution.get("execution_mode", "robot_agent") == "robot_agent"
                     and attempt
                     and self._current_step_locked(execution).get("action_id")
                     == descriptor["capability_id"]
@@ -467,6 +561,8 @@ class ExecutionManager:
             execution = self._executions[execution_id]
             async with self._locks[execution_id]:
                 if execution["state"] != "running" or not execution.get("active_attempt"):
+                    continue
+                if execution.get("execution_mode", "robot_agent") != "robot_agent":
                     continue
                 step = self._current_step_locked(execution)
                 attempt = execution["active_attempt"]
@@ -913,8 +1009,12 @@ class ExecutionManager:
         step["status"] = "active"
         started = _now()
         is_pick = step.get("action_id") == "A_001"
+        visual_mode = execution.get("execution_mode") == "visual_monitor"
+        visual_timeout = float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120"))
         timeout_seconds = (
-            self.pick_claim_timeout_seconds if is_pick else execution["timeout_seconds"]
+            visual_timeout if visual_mode
+            else self.pick_claim_timeout_seconds if is_pick
+            else execution["timeout_seconds"]
         )
         attempt = {
             "attempt_id": str(uuid4()),
@@ -927,7 +1027,7 @@ class ExecutionManager:
             "source": None,
             "detail": None,
         }
-        if is_pick:
+        if is_pick and not visual_mode:
             preview = self._workflow_preview_locked(step["action_id"])
             if preview:
                 attempt["workflow_preview"] = preview

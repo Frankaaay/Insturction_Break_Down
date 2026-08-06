@@ -20,9 +20,9 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -34,9 +34,16 @@ from execution import (
 )
 from primitives import load_atomic_catalog, load_expert_catalog
 from providers import PROVIDERS
+from realtime_monitor import VisualMonitorService, utc_iso
 
 app = FastAPI(title="Planner Monitor")
 execution_manager = ExecutionManager()
+async def _update_visual_execution(**kwargs):
+    return await execution_manager.update_visual_monitor(**kwargs)
+
+
+visual_monitor = VisualMonitorService(_update_visual_execution)
+visual_baselines: dict[tuple[str, str, str], Path] = {}
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -45,6 +52,14 @@ class DecomposeRequest(BaseModel):
     instruction: str
     provider: str = "deepseek"
     model: str | None = None
+
+
+class ExecutionModeRequest(BaseModel):
+    mode: Literal["robot_agent", "visual_monitor"]
+
+
+class VisualClaimRequest(BaseModel):
+    camera_id: str = Field(min_length=1, max_length=128)
 
 
 class MonitorReportRequest(BaseModel):
@@ -114,6 +129,10 @@ def _require_agent(authorization: str | None) -> None:
     _require_token("GRASPARM_AGENT_TOKEN", authorization, "Bearer ")
 
 
+def _require_visual_monitor(authorization: str | None) -> None:
+    _require_token("VISUAL_MONITOR_TOKEN", authorization, "Bearer ")
+
+
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ExecutionNotFoundError):
         return HTTPException(status_code=404, detail="执行会话不存在或已失效")
@@ -180,6 +199,19 @@ async def start_execution(
     _require_operator(x_operator_token)
     try:
         return {"execution": await execution_manager.start(execution_id)}
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/executions/{execution_id}/mode")
+async def set_execution_mode(
+    execution_id: str,
+    req: ExecutionModeRequest,
+    x_operator_token: str | None = Header(default=None),
+) -> dict:
+    _require_operator(x_operator_token)
+    try:
+        return {"execution": await execution_manager.set_mode(execution_id, req.mode)}
     except (ExecutionNotFoundError, ExecutionConflictError) as exc:
         raise _http_error(exc) from exc
 
@@ -327,6 +359,126 @@ async def complete_agent_workflow(
         raise _http_error(exc) from exc
 
 
+@app.post("/api/visual-monitor/claim")
+async def claim_visual_monitor(
+    req: VisualClaimRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_visual_monitor(authorization)
+    return {"assignment": await execution_manager.claim_visual_monitor(req.camera_id)}
+
+
+@app.post("/api/visual-monitor/baseline")
+async def upload_visual_baseline(
+    execution_id: str = Form(...),
+    attempt_id: str = Form(...),
+    camera_id: str = Form(...),
+    captured_at: str = Form(...),
+    image: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_visual_monitor(authorization)
+    try:
+        path, size, write_ms = await visual_monitor.save_upload(image, ".jpg")
+        visual_baselines[(execution_id, attempt_id, camera_id)] = path
+        snapshot = await execution_manager.update_visual_monitor(
+            execution_id,
+            attempt_id=attempt_id,
+            camera_id=camera_id,
+            patch={
+                "state": "ready",
+                "baseline_url": f"/api/visual-monitor/media/{path.name}",
+                "baseline_captured_at": captured_at,
+            },
+            event_type="visual_monitor.baseline.ready",
+        )
+        visual_monitor.cleanup_expired()
+        return {"accepted": True, "bytes": size, "server_write_ms": round(write_ms, 1), "received_at": utc_iso(), "execution": snapshot}
+    except (ValueError, ExecutionNotFoundError, ExecutionConflictError) as exc:
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise _http_error(exc) from exc
+
+
+@app.post("/api/visual-monitor/checkpoints", status_code=202)
+async def upload_visual_checkpoint(
+    execution_id: str = Form(...),
+    attempt_id: str = Form(...),
+    camera_id: str = Form(...),
+    sequence: int = Form(..., ge=1),
+    window_started_at: str = Form(...),
+    window_ended_at: str = Form(...),
+    capture_ms: float = Form(..., ge=0),
+    encode_ms: float = Form(..., ge=0),
+    video: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_visual_monitor(authorization)
+    assignment = await execution_manager.claim_visual_monitor(camera_id)
+    if not assignment or assignment["execution_id"] != execution_id or assignment["attempt_id"] != attempt_id:
+        raise HTTPException(status_code=409, detail="Visual Monitor assignment 已过期")
+    baseline = visual_baselines.get((execution_id, attempt_id, camera_id))
+    if not baseline or not baseline.is_file():
+        raise HTTPException(status_code=409, detail="请先上传 BEFORE baseline")
+    try:
+        path, size, write_ms = await visual_monitor.save_upload(video, ".mp4")
+        visual_monitor.cleanup_expired()
+        await visual_monitor.submit(
+            assignment=assignment,
+            camera_id=camera_id,
+            sequence=sequence,
+            baseline_path=baseline,
+            video_path=path,
+            client_timings={
+                "capture": capture_ms,
+                "encode": encode_ms,
+                "server_write": round(write_ms, 1),
+            },
+        )
+        return {"accepted": True, "sequence": sequence, "bytes": size, "server_write_ms": round(write_ms, 1), "in_flight": visual_monitor.in_flight, "received_at": utc_iso()}
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-monitor/upload-probe")
+async def upload_visual_probe(
+    camera_id: str = Form(...),
+    capture_ms: float = Form(..., ge=0),
+    encode_ms: float = Form(..., ge=0),
+    video: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Measure camera capture/encode/upload without creating a Bailian request."""
+    _require_visual_monitor(authorization)
+    try:
+        path, size, write_ms = await visual_monitor.save_upload(video, ".mp4")
+        visual_monitor.cleanup_expired()
+        return {
+            "accepted": True,
+            "camera_id": camera_id,
+            "bytes": size,
+            "capture_ms": capture_ms,
+            "encode_ms": encode_ms,
+            "server_write_ms": round(write_ms, 1),
+            "media_url": f"/api/visual-monitor/media/{path.name}",
+            "received_at": utc_iso(),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+
+@app.get("/api/visual-monitor/media/{media_name}")
+async def get_visual_media(media_name: str) -> FileResponse:
+    if Path(media_name).name != media_name:
+        raise HTTPException(status_code=404, detail="媒体不存在")
+    path = visual_monitor.config.storage_root / media_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="媒体不存在")
+    return FileResponse(path)
+
+
 @app.get("/api/executions/{execution_id}/events")
 async def execution_events(execution_id: str) -> StreamingResponse:
     try:
@@ -360,6 +512,7 @@ async def execution_events(execution_id: str) -> StreamingResponse:
 
 @app.on_event("shutdown")
 async def close_execution_manager() -> None:
+    await visual_monitor.close()
     await execution_manager.close()
 
 

@@ -23,7 +23,7 @@
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
 - **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
-- **Visual Monitor Lab**:`monitor/` 独立保存视觉监控实验代码和依赖；本阶段尚未接入网站执行状态机
+- **RealSense Visual Monitor**:Windows 客户端上传 7 秒 RGB 视频窗口，服务器每 5 秒调用百炼并通过 SSE 展示观察结果；VLM 不自动推进任务
 
 ## 快速开始
 
@@ -51,6 +51,31 @@ python server.py            # 监听 0.0.0.0:8000
 
 浏览器打开 `http://localhost:8000`:左侧是可折叠/搜索的原子与专家操作库;主区域可审阅拆解计划、启动执行、观察步骤高亮与倒计时,并用虚拟 Monitor 上报成功/失败。
 
+### RealSense Visual Monitor
+
+Windows 端直接使用 `pyrealsense2`，不需要安装 ROS 或 `realsense-ros`。先安装本地采集依赖：
+
+```powershell
+python -m pip install -r monitor/requirements-realsense.txt
+```
+
+服务器 `.env` 至少配置 `DASHSCOPE_API_KEY` 和 `VISUAL_MONITOR_TOKEN`。本地只配置同一个 monitor token，不保存百炼 key。先测 7 秒视频的采集、编码和上传链路（不会请求百炼）：
+
+```powershell
+$env:VISUAL_MONITOR_TOKEN="与服务器一致的随机令牌"
+python monitor/realsense_client.py probe --server https://112.74.61.202
+```
+
+如果代理规则还没将服务器设为直连，可临时加 `--no-proxy`；如果服务器使用不受信任的测试证书才加 `--insecure`。输出分别包含 `capture_ms`、`encode_ms`、`client_upload_roundtrip_ms`、`server_write_ms`、帧数和 MP4 大小。
+
+正式本地监控：网页生成计划后选择“仅视觉 Monitor”并开始，再运行：
+
+```powershell
+python monitor/realsense_client.py run --server https://112.74.61.202
+```
+
+客户端使用 640×480@30 FPS 采集，向上传视频降采样为 6 FPS、H.264 CRF 28；首个检查点积累完整 7 秒，之后每 5 秒提交最近 7 秒滚动窗口。服务器只允许 2 个并发推理，媒体保留 24 小时。当前只为 `A_001 Pick` 建立了严格视觉契约；百炼默认 `qwen3.7-plus` 且关闭思考。网页显示最新状态、失败自然语言原因、完成证据帧和分段耗时，但必须由人点击确认后才推进操作链。
+
 HTTP API(供其他程序调用):
 
 - `GET /api/providers` — 可用提供商列表
@@ -59,6 +84,7 @@ HTTP API(供其他程序调用):
 - `POST /api/executions` — 拆解指令并创建 `ready` 执行会话,body 与 `/api/decompose` 相同
 - `GET /api/executions/{id}` — 获取执行会话权威快照
 - `POST /api/executions/{id}/start` — 确认并启动执行
+- `POST /api/executions/{id}/mode` — 开始前切换 `robot_agent` / `visual_monitor`
 - `POST /api/executions/{id}/reports` — 人工/机器人 Monitor 上报当前 attempt 结果
 - `POST /api/executions/{id}/retry` — 暂停后再尝试当前步骤一次
 - `POST /api/executions/{id}/terminate` — 终止执行
@@ -68,6 +94,10 @@ HTTP API(供其他程序调用):
 - `POST /api/agent/heartbeat` — 保持机器人 workflow claim 存活
 - `POST /api/agent/events` — 幂等上报内部节点状态、退出码和有限日志
 - `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
+- `POST /api/visual-monitor/claim` — RealSense 客户端领取当前 Visual Pick attempt
+- `POST /api/visual-monitor/baseline` — 上传操作开始前的 JPEG
+- `POST /api/visual-monitor/checkpoints` — 上传 7 秒 H.264 检查窗口并异步触发百炼
+- `POST /api/visual-monitor/upload-probe` — 只测采集/编码/上传，不请求模型
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:
 

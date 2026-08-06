@@ -18,6 +18,11 @@ python -m pip install -r monitor/requirements.txt
 Set-Location monitor
 ```
 
+The Windows RealSense uploader is `realsense_client.py`; its small, separate
+dependency set is in `requirements-realsense.txt`. See the repository root
+README for `probe` and continuous `run` commands. It uses RGB only and does not
+require ROS.
+
 Prototype for testing whether a vision-language model can monitor short robot
 manipulation clips and decide whether an atomic operation is on track,
 successful, risky, or failed.

@@ -81,6 +81,33 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         execution = await self.manager.create("把水壶放到桌子上", "test", None, STEPS)
         return await self.manager.start(execution["execution_id"])
 
+    async def test_visual_mode_claim_and_observation_do_not_auto_advance(self):
+        execution = await self.manager.create(
+            "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"
+        )
+        started = await self.manager.start(execution["execution_id"])
+        self.assertEqual(started["execution_mode"], "visual_monitor")
+        self.assertNotIn("workflow_preview", started["active_attempt"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        self.assertEqual(assignment["attempt_id"], started["active_attempt"]["attempt_id"])
+        snapshot = await self.manager.update_visual_monitor(
+            execution["execution_id"],
+            attempt_id=assignment["attempt_id"],
+            camera_id="camera-1",
+            patch={"state": "observing", "latest": {"status": "succeeded"}},
+            event_type="visual_monitor.observation",
+        )
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["steps"][0]["status"], "active")
+
+    async def test_mode_can_only_change_before_start(self):
+        execution = await self.manager.create("拿起水壶", "test", None, STEPS[:1])
+        changed = await self.manager.set_mode(execution["execution_id"], "visual_monitor")
+        self.assertEqual(changed["execution_mode"], "visual_monitor")
+        await self.manager.start(execution["execution_id"])
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.set_mode(execution["execution_id"], "robot_agent")
+
     async def resolve(self, execution, outcome, report_id=None):
         step = execution["steps"][execution["current_step_index"]]
         attempt = execution["active_attempt"]

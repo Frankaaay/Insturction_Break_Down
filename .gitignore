@@ -10,6 +10,7 @@ monitor/data/*
 !monitor/data/recorded_samples/
 monitor/data/recorded_samples/*
 !monitor/data/recorded_samples/README.md
+monitor/runtime_data/
 artifacts/
 logs/
 tmp/

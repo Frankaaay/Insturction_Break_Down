@@ -17,6 +17,7 @@ const STATE_LABELS = {
 const EVENT_LABELS = {
   "execution.created": "执行计划已创建",
   "execution.started": "执行会话已启动",
+  "execution.mode.changed": "执行模式已切换",
   "execution.resumed": "人工恢复当前步骤",
   "execution.paused": "连续失败，执行已暂停",
   "execution.completed": "全部原子操作已完成",
@@ -30,6 +31,10 @@ const EVENT_LABELS = {
   "workflow.node.updated": "GraspArm 内部步骤更新",
   "workflow.agent.stale": "GraspArm Agent 心跳中断",
   "workflow.agent.replaced": "GraspArm Agent 进程已更换，自动恢复被拒绝",
+  "visual_monitor.claimed": "视觉采集端已连接",
+  "visual_monitor.baseline.ready": "视觉初始帧已就绪",
+  "visual_monitor.observation": "VLM 返回最新观察",
+  "visual_monitor.error": "VLM 请求失败",
 };
 
 function esc(value) {
@@ -222,9 +227,14 @@ function currentStep() {
 
 function monitorControls() {
   if (execution.state === "ready") {
+    const mode = execution.execution_mode || "robot_agent";
     return `<div class="monitor-kicker">Plan review</div>
       <div class="monitor-action">计划等待确认</div>
-      <div class="monitor-sub">启动后，后端将等待对应 Monitor 或机器人 Agent 领取当前原子操作。</div>
+      <div class="monitor-sub">先选择执行链路，再开始当前原子操作。</div>
+      <div class="mode-switch">
+        <button data-action="mode-robot_agent" class="${mode === "robot_agent" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>机器人 Agent</button>
+        <button data-action="mode-visual_monitor" class="${mode === "visual_monitor" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>仅视觉 Monitor</button>
+      </div>
       <div class="monitor-buttons">
         <button class="control-btn primary" data-action="start" ${commandBusy ? "disabled" : ""}>开始执行</button>
         <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>放弃计划</button>
@@ -250,6 +260,29 @@ function monitorControls() {
           <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止后续调度</button>
         </div>
         <div class="monitor-note">网页终止不是物理急停；异常运动必须使用现场急停。</div>`;
+    }
+    const visual = attempt.visual_monitor;
+    if (execution.execution_mode === "visual_monitor") {
+      const latest = visual?.latest;
+      const statusLabel = {
+        in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "无法判断",
+      }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
+      const evidence = latest?.completion_evidence_url
+        ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
+      const timings = latest?.timings_ms;
+      return `<div class="monitor-kicker">Visual Monitor · Attempt ${attempt.attempt_no}</div>
+        <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
+        <div class="monitor-action">${esc(step.zh)}</div>
+        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端将上传 7 秒窗口，服务器每 5 秒触发一次百炼判断。")}</div>
+        ${latest?.failure_reason ? `<div class="visual-failure">${esc(latest.failure_reason)}</div>` : ""}
+        ${evidence}
+        ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}
+        <div class="monitor-buttons">
+          <button class="control-btn success" data-action="report-success" ${commandBusy ? "disabled" : ""}>人工确认成功</button>
+          <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
+          <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
+        </div>
+        <div class="monitor-note">VLM 只提供视觉观察，不自动推进或停止任务。</div>`;
     }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>
@@ -439,6 +472,7 @@ async function postControl(suffix, body = null, tokenRetry = false) {
 function handleControl(action) {
   if (!execution) return;
   if (action === "start") return postControl("start");
+  if (action.startsWith("mode-")) return postControl("mode", { mode: action.slice(5) });
   if (action === "retry") return postControl("retry");
   if (action === "terminate") return postControl("terminate");
   if (action.startsWith("report-")) {
