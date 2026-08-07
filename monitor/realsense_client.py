@@ -264,7 +264,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--token")
     result.add_argument("--serial")
     result.add_argument("--window-seconds", type=float, default=7.0)
-    result.add_argument("--cycle-seconds", type=float, default=5.0)
+    result.add_argument("--cycle-seconds", type=float, default=7.0)
     result.add_argument("--video-fps", type=int, default=6)
     result.add_argument("--http-timeout", type=float, default=30.0)
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")

@@ -273,7 +273,7 @@ function monitorControls() {
       return `<div class="monitor-kicker">Visual Monitor · Attempt ${attempt.attempt_no}</div>
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
-        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端将上传 7 秒窗口，服务器每 5 秒触发一次百炼判断。")}</div>
+        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端每 7 秒上传一个完整 7 秒窗口，并触发一次百炼判断。")}</div>
         ${latest?.failure_reason ? `<div class="visual-failure">${esc(latest.failure_reason)}</div>` : ""}
         ${evidence}
         ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}
