@@ -45,7 +45,8 @@ def encode_mp4(frames: list[Any], output: Path, fps: int = 6) -> None:
     height, width = frames[0].shape[:2]
     writer = imageio_ffmpeg.write_frames(
         str(output), (width, height), fps=fps, codec="libx264", pix_fmt_in="rgb24",
-        output_params=["-pix_fmt", "yuv420p", "-crf", "28", "-movflags", "+faststart", "-an"],
+        pix_fmt_out="yuv420p",
+        output_params=["-crf", "28", "-movflags", "+faststart", "-an"],
     )
     writer.send(None)
     try:
