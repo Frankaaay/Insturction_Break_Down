@@ -74,6 +74,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         self.environment = patch.dict(os.environ, {
             "OPERATOR_TOKEN": "",
             "GRASPARM_AGENT_TOKEN": "",
+            "VISUAL_MONITOR_TOKEN": "",
             "EXECUTION_DB_PATH": "",
         })
         self.environment.start()
@@ -128,6 +129,14 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
 
         response = await self.client.get(f"/api/executions/{execution['execution_id']}")
         self.assertEqual(response.json()["execution"]["progress"]["succeeded"], 1)
+
+    async def test_app_shell_and_script_disable_stale_browser_cache(self):
+        for path in ("/", "/index.html", "/app.js"):
+            response = await self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("cache-control"), "no-store")
+        index = (await self.client.get("/")).text
+        self.assertIn("/app.js?v=visual-monitor-20260807", index)
 
     async def test_visual_monitor_upload_updates_snapshot_without_advancing(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):

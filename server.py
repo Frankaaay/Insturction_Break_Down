@@ -48,6 +48,14 @@ visual_baselines: dict[tuple[str, str, str], Path] = {}
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+@app.middleware("http")
+async def disable_stale_app_shell_cache(request, call_next):
+    response = await call_next(request)
+    if request.url.path in {"/", "/index.html", "/app.js"}:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 class DecomposeRequest(BaseModel):
     instruction: str
     provider: str = "deepseek"
