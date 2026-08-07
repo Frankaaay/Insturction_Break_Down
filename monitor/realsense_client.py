@@ -106,6 +106,8 @@ class RealSenseMonitorClient:
         pipeline, serial, _ = self.open_camera()
         self.warm_up(pipeline)
         started = time.perf_counter()
+        capture_finished = started
+        stop_ms = 0.0
         frames = []
         try:
             deadline = time.perf_counter() + self.args.window_seconds
@@ -114,8 +116,11 @@ class RealSenseMonitorClient:
                 if color:
                     frames.append((time.time(), self.np.asanyarray(color.get_data()).copy()))
         finally:
+            capture_finished = time.perf_counter()
+            stop_started = time.perf_counter()
             pipeline.stop()
-        capture_ms = (time.perf_counter() - started) * 1000
+            stop_ms = (time.perf_counter() - stop_started) * 1000
+        capture_ms = (capture_finished - started) * 1000
         selected = sample_window(deque(frames), frames[0][0], frames[-1][0], self.args.video_fps)
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
@@ -137,6 +142,7 @@ class RealSenseMonitorClient:
             result["frame_count_captured"] = len(frames)
             result["frame_count_uploaded"] = len(selected)
             result["local_file_bytes"] = video_path.stat().st_size
+            result["device_stop_ms"] = round(stop_ms, 1)
             return result
         finally:
             video_path.unlink(missing_ok=True)
