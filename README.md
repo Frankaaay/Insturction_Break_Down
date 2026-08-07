@@ -62,9 +62,11 @@ python -m pip install -r monitor/requirements-realsense.txt
 服务器 `.env` 至少配置 `DASHSCOPE_API_KEY` 和 `VISUAL_MONITOR_TOKEN`。本地只配置同一个 monitor token，不保存百炼 key。先测 7 秒视频的采集、编码和上传链路（不会请求百炼）：
 
 ```powershell
-$env:VISUAL_MONITOR_TOKEN="与服务器一致的随机令牌"
 python monitor/realsense_client.py probe --server https://112.74.61.202
 ```
+
+客户端会自动读取仓库根目录中被 Git 忽略的 `.env`；也可以用环境变量或
+`--token` 显式覆盖 `VISUAL_MONITOR_TOKEN`。
 
 如果代理规则还没将服务器设为直连，可临时加 `--no-proxy`；如果服务器使用不受信任的测试证书才加 `--insecure`。输出分别包含 `capture_ms`、`encode_ms`、`client_upload_roundtrip_ms`、`server_write_ms`、帧数和 MP4 大小。
 

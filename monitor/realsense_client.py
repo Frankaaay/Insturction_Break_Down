@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 
 
 def utc_iso(timestamp: float | None = None) -> str:
@@ -283,6 +284,7 @@ def main() -> int:
     args = parser().parse_args()
     if args.window_seconds <= 0 or args.cycle_seconds <= 0 or args.video_fps <= 0:
         raise SystemExit("窗口、周期和视频 FPS 必须大于 0")
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     client = RealSenseMonitorClient(args)
     if args.command == "probe":
         try:
