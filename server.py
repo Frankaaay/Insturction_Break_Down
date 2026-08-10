@@ -45,7 +45,14 @@ async def _update_visual_execution(**kwargs):
     return await execution_manager.update_visual_monitor(**kwargs)
 
 
-visual_monitor = VisualMonitorService(_update_visual_execution)
+async def _complete_visual_execution(**kwargs):
+    return await execution_manager.complete_visual_success(**kwargs)
+
+
+visual_monitor = VisualMonitorService(
+    _update_visual_execution,
+    success_callback=_complete_visual_execution,
+)
 visual_baselines: dict[tuple[str, str, str], Path] = {}
 live_preview_hub = LivePreviewHub()
 

@@ -400,6 +400,60 @@ class ExecutionManager:
             })
             return self._snapshot_locked(execution)
 
+    async def complete_visual_success(
+        self,
+        execution_id: str,
+        *,
+        attempt_id: str,
+        camera_id: str,
+        latest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically persist a successful visual observation and advance."""
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            attempt = execution.get("active_attempt")
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "visual_monitor"
+                or not attempt
+                or attempt["attempt_id"] != attempt_id
+                or attempt["status"] != "waiting"
+            ):
+                raise ExecutionConflictError("Visual Monitor attempt 已过期")
+            monitor = attempt.get("visual_monitor")
+            if not monitor or monitor.get("camera_id") != camera_id:
+                raise ExecutionConflictError("Visual Monitor camera claim 不匹配")
+            if monitor.get("state") != "inferencing":
+                raise ExecutionConflictError("Visual Monitor 推理结果已过期")
+            if latest.get("status") != "succeeded":
+                raise ExecutionConflictError("自动推进只接受 succeeded 结果")
+            if monitor.get("active_sequence") != latest.get("sequence"):
+                raise ExecutionConflictError("Visual Monitor sequence 已过期")
+
+            monitor.update({
+                "state": "succeeded",
+                "active_sequence": None,
+                "latest": copy.deepcopy(latest),
+            })
+            step = self._current_step_locked(execution)
+            self._record_event_locked(execution, "visual_monitor.observation", {
+                "step_id": step["step_id"],
+                "attempt_id": attempt_id,
+                "camera_id": camera_id,
+                "status": "succeeded",
+                "auto_advance": True,
+            })
+            self._cancel_timer_locked(execution_id)
+            self._cancel_heartbeat_timer_locked(execution_id)
+            self._resolve_attempt_locked(
+                execution,
+                outcome="success",
+                source="visual_monitor",
+                detail=latest.get("description_zh"),
+                cancel_timer=False,
+            )
+            return self._snapshot_locked(execution)
+
     async def get(self, execution_id: str) -> dict[str, Any]:
         execution = self._require(execution_id)
         async with self._locks[execution_id]:

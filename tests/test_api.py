@@ -137,6 +137,9 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
         self.assertIn("/app.js?v=visual-monitor-20260807", index)
+        script = (await self.client.get("/app.js")).text
+        self.assertNotIn("人工确认成功", script)
+        self.assertIn("VLM 判定成功后将自动进入下一步骤", script)
 
     async def test_visual_monitor_upload_updates_snapshot_without_advancing(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):
@@ -222,7 +225,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         await server.execution_manager.update_visual_monitor(
             created["execution_id"], attempt_id=assignment["attempt_id"],
             camera_id="cam-resume",
-            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
+            patch={"state": "awaiting_confirmation", "latest": {"status": "failed"}},
             event_type="visual_monitor.observation",
         )
         response = await self.client.post(

@@ -90,7 +90,7 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         execution = await self.manager.create("把水壶放到桌子上", "test", None, STEPS)
         return await self.manager.start(execution["execution_id"])
 
-    async def test_visual_mode_claim_and_observation_do_not_auto_advance(self):
+    async def test_visual_failure_observation_waits_for_confirmation(self):
         execution = await self.manager.create(
             "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"
         )
@@ -112,7 +112,7 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
             execution["execution_id"],
             attempt_id=assignment["attempt_id"],
             camera_id="camera-1",
-            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
+            patch={"state": "awaiting_confirmation", "latest": {"status": "failed"}},
             event_type="visual_monitor.observation",
         )
         self.assertEqual(snapshot["state"], "running")
@@ -132,6 +132,45 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(monitor["latest"])
         reclaimed = await self.manager.claim_visual_monitor("camera-1")
         self.assertEqual(reclaimed["monitor_epoch"], 2)
+
+    async def test_visual_success_atomically_advances_and_rejects_stale_repeat(self):
+        execution = await self.manager.create(
+            "拿起并搬运水壶", "test", None, CHAIN_STEPS[:2],
+            execution_mode="visual_monitor",
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
+        latest = {
+            "status": "succeeded", "sequence": 1,
+            "description_zh": "水壶在窗口结尾仍被拿起",
+        }
+        snapshot = await self.manager.complete_visual_success(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", latest=latest,
+        )
+        self.assertEqual(snapshot["steps"][0]["status"], "succeeded")
+        self.assertEqual(snapshot["steps"][0]["attempts"][-1]["source"], "visual_monitor")
+        self.assertEqual(
+            snapshot["steps"][0]["attempts"][-1]["visual_monitor"]["latest"], latest,
+        )
+        self.assertEqual(snapshot["current_step_index"], 1)
+        self.assertEqual(snapshot["active_attempt"]["status"], "waiting")
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.complete_visual_success(
+                execution["execution_id"], attempt_id=assignment["attempt_id"],
+                camera_id="camera-1", latest=latest,
+            )
+        next_assignment = await self.manager.claim_visual_monitor("camera-1")
+        self.assertEqual(next_assignment["action_id"], "A_003")
 
     async def test_only_one_visual_inference_can_be_reserved(self):
         execution = await self.manager.create(
@@ -181,7 +220,7 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.update_visual_monitor(
             execution["execution_id"], attempt_id=assignment["attempt_id"],
             camera_id="camera-1",
-            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
+            patch={"state": "awaiting_confirmation", "latest": {"status": "failed"}},
             event_type="visual_monitor.observation",
         )
         await self.manager.resume_timers()

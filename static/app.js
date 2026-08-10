@@ -381,12 +381,11 @@ function monitorControls() {
         ${evidence}
         ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}
         <div class="monitor-buttons">
-          <button class="control-btn success" data-action="report-success" ${commandBusy ? "disabled" : ""}>人工确认成功</button>
           <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
           ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}
           <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
         </div>
-        <div class="monitor-note">${awaitingConfirmation ? "已暂停视频缓存和百炼请求，等待人工确认。" : "VLM 只提供视觉观察，不自动推进任务。"}</div>`;
+        <div class="monitor-note">${awaitingConfirmation ? "VLM 判定失败，已暂停请求并等待人工确认。" : "VLM 判定成功后将自动进入下一步骤。"}</div>`;
     }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>

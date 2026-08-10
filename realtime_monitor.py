@@ -122,9 +122,11 @@ class VisualMonitorService:
         self,
         update_callback: Callable[..., Awaitable[dict[str, Any]]],
         config: VisualMonitorConfig | None = None,
+        success_callback: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.config = config or VisualMonitorConfig.from_env()
         self.update_callback = update_callback
+        self.success_callback = success_callback
         self.config.storage_root.mkdir(parents=True, exist_ok=True)
         self._tasks: set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(timeout=self.config.timeout_seconds)
@@ -212,16 +214,17 @@ class VisualMonitorService:
             log_path = job["video_path"].with_suffix(".json")
             log_path.write_text(json.dumps({"latest": latest, "raw": raw}, ensure_ascii=False, indent=2), encoding="utf-8")
             try:
-                next_state = (
-                    "awaiting_confirmation"
-                    if result["status"] in {"succeeded", "failed"}
-                    else "observing"
-                )
-                await self.update_callback(
-                    **common,
-                    patch={"state": next_state, "latest": latest, "active_sequence": None},
-                    event_type="visual_monitor.observation",
-                )
+                if result["status"] == "succeeded":
+                    if self.success_callback is None:
+                        raise RuntimeError("Visual Monitor 未配置成功自动推进回调")
+                    await self.success_callback(**common, latest=latest)
+                else:
+                    next_state = "awaiting_confirmation" if result["status"] == "failed" else "observing"
+                    await self.update_callback(
+                        **common,
+                        patch={"state": next_state, "latest": latest, "active_sequence": None},
+                        event_type="visual_monitor.observation",
+                    )
             except ExecutionConflictError:
                 # The operator may have confirmed the step while inference was in flight.
                 # The execution manager rejects that stale attempt; never let it overwrite
