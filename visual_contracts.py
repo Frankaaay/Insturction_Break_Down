@@ -37,12 +37,13 @@ PICK_CONTRACT = ActionVisualContract(
     required_slots=("obj_a",),
     succeeded=(
         "能确认拿起的是指定 obj_a。",
-        "目标物明确离开原支撑面，并稳定地被手握持。",
+        "在窗口结尾的 NOW 画面中，目标物仍明确离开原支撑面，并稳定地被手握持。",
         "必须有目标物底部、原支撑面或二者间隙等直接可见证据。",
     ),
     in_progress=(
         "手正在接近、抓握或开始抬起，但尚未明确离开支撑面。",
         "抓空、滑落或掉落后仍在重新尝试。",
+        "窗口中曾拿起目标物，但在 NOW 画面中已经放回原支撑面。",
     ),
     failed=(
         "明确拿起了错误物体，而指定目标物仍留在原处。",
@@ -163,7 +164,7 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
     if missing:
         raise ValueError(f"动作契约缺少 slots: {', '.join(missing)}")
     slot_text = "，".join(f"{name}={slots[name]}" for name in contract.required_slots)
-    return f"""你是实时视觉观察器。只基于给出的本步骤 BEFORE 初始图和随后 6 秒视频，判断当前原子操作的视觉状态。
+    return f"""你是实时视觉观察器。只基于给出的本步骤 BEFORE 初始图、随后 6 秒视频和窗口结尾 NOW 图，判断当前原子操作在检查点结束时的视觉状态。
 
 动作：{contract.name}（{contract.contract_key}，contract v{contract.version}）
 操作描述：{assignment.get('zh') or assignment.get('action') or contract.name}
@@ -173,7 +174,7 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 
 公共状态规则：
 - in_progress：操作尚未完成，但仍在执行、调整或仍有机会继续完成。可恢复的抓空、滑脱或掉落后继续尝试也属于 in_progress。
-- succeeded：本动作契约列出的成功后置条件已经明确可见。
+- succeeded：本动作契约列出的成功后置条件在窗口结尾 NOW 画面中仍然明确成立。窗口中途曾经满足、但结尾已不满足，不能判为 succeeded。
 - failed：根据当前直接可见事实，本次原子操作已经失败。只有 failed 才填写自然语言 failure_reason，原因不使用预定义枚举。
 - unknown：关键区域遮挡、画质不足或证据不足，无法可靠判断。不能猜测。
 
@@ -195,6 +196,7 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 输出规则：
 - evidence 只写直接可见事实，不写隐藏推理、操作意图或控制建议。
 - evidence 时间戳和 completion_evidence_timestamp_s 都相对这段 6 秒视频开头，范围为 0 到 6 秒。
+- succeeded 的 completion_evidence_timestamp_s 必须在最后 1 秒（5 到 6 秒），并对应 NOW 中仍成立的成功后置条件。
 - 只有 succeeded 才填写 completion_evidence_timestamp_s；其他状态必须为 null。
 - 非 failed 状态的 failure_reason 必须为 null。
 - 不决定继续、推进、停止或恢复；这些属于独立控制层。

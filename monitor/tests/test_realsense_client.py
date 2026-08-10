@@ -31,6 +31,9 @@ class RealSenseClientTests(unittest.TestCase):
         self.assertEqual((args.preview_width, args.preview_height), (640, 480))
         self.assertEqual(args.preview_quality, 65)
 
+    def test_preview_fps_parser_accepts_ten(self):
+        self.assertEqual(parser().parse_args(["run", "--preview-fps", "10"]).preview_fps, 10.0)
+
     def test_assignment_identity_isolated_by_attempt(self):
         first = {"execution_id": "execution-1", "attempt_id": "attempt-1"}
         second = {"execution_id": "execution-1", "attempt_id": "attempt-2"}

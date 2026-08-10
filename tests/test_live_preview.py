@@ -14,6 +14,10 @@ JPEG_C = b"\xff\xd8frame-c\xff\xd9"
 
 
 class LivePreviewPacketTests(unittest.TestCase):
+    def test_server_preview_ceiling_supports_ten_fps_with_timer_tolerance(self):
+        self.assertEqual(server.PREVIEW_MAX_FPS, 10.0)
+        self.assertLess(server.PREVIEW_MIN_INTERVAL_SECONDS, 0.1)
+
     def test_packet_round_trip_keeps_capture_time_sequence_and_jpeg(self):
         packet = pack_preview_frame(1_786_000_000.25, 17, JPEG_A)
         frame = unpack_preview_frame("camera-1", packet)

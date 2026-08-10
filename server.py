@@ -49,6 +49,11 @@ visual_monitor = VisualMonitorService(_update_visual_execution)
 visual_baselines: dict[tuple[str, str, str], Path] = {}
 live_preview_hub = LivePreviewHub()
 
+PREVIEW_MAX_FPS = 10.0
+# Leave 10% scheduling tolerance so a client targeting exactly 10 FPS is not
+# accidentally reduced by timer jitter.
+PREVIEW_MIN_INTERVAL_SECONDS = 0.9 / PREVIEW_MAX_FPS
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -417,7 +422,7 @@ async def ingest_live_preview(websocket: WebSocket, camera_id: str) -> None:
         while True:
             packet = await websocket.receive_bytes()
             now = time.monotonic()
-            if now - last_accepted < 0.18:  # hard ceiling just above the supported 5 FPS
+            if now - last_accepted < PREVIEW_MIN_INTERVAL_SECONDS:
                 continue
             try:
                 await live_preview_hub.publish(camera_id, packet)
@@ -506,6 +511,7 @@ async def upload_visual_checkpoint(
     capture_ms: float = Form(..., ge=0),
     encode_ms: float = Form(..., ge=0),
     video: UploadFile = File(...),
+    now_image: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ) -> dict:
     _require_visual_monitor(authorization)
@@ -520,7 +526,9 @@ async def upload_visual_checkpoint(
     if not baseline or not baseline.is_file():
         raise HTTPException(status_code=409, detail="请先上传 BEFORE baseline")
     try:
-        path, size, write_ms = await visual_monitor.save_upload(video, ".mp4")
+        path, size, video_write_ms = await visual_monitor.save_upload(video, ".mp4")
+        now_path, now_size, now_write_ms = await visual_monitor.save_upload(now_image, ".jpg")
+        write_ms = video_write_ms + now_write_ms
         visual_monitor.cleanup_expired()
         await execution_manager.begin_visual_checkpoint(
             execution_id,
@@ -535,6 +543,7 @@ async def upload_visual_checkpoint(
                 sequence=sequence,
                 baseline_path=baseline,
                 video_path=path,
+                now_path=now_path,
                 client_timings={
                     "capture": capture_ms,
                     "encode": encode_ms,
@@ -550,7 +559,15 @@ async def upload_visual_checkpoint(
                 event_type="visual_monitor.error",
             )
             raise exc
-        return {"accepted": True, "sequence": sequence, "bytes": size, "server_write_ms": round(write_ms, 1), "in_flight": visual_monitor.in_flight, "received_at": utc_iso()}
+        return {
+            "accepted": True,
+            "sequence": sequence,
+            "bytes": size,
+            "now_bytes": now_size,
+            "server_write_ms": round(write_ms, 1),
+            "in_flight": visual_monitor.in_flight,
+            "received_at": utc_iso(),
+        }
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (ExecutionNotFoundError, ExecutionConflictError) as exc:

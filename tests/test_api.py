@@ -179,7 +179,10 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "window_started_at": "2026-08-06T00:00:00Z",
                 "window_ended_at": "2026-08-06T00:00:06Z",
                 "capture_ms": "6000", "encode_ms": "80",
-            }, files={"video": ("window.mp4", b"mp4", "video/mp4")})
+            }, files={
+                "video": ("window.mp4", b"mp4", "video/mp4"),
+                "now_image": ("now.jpg", b"jpeg-now", "image/jpeg"),
+            })
             self.assertEqual(checkpoint.status_code, 202)
             for _ in range(20):
                 if not service.in_flight:
@@ -281,11 +284,17 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             }
             first = await self.client.post(
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "1"},
-                files={"video": ("one.mp4", b"mp4", "video/mp4")},
+                files={
+                    "video": ("one.mp4", b"mp4", "video/mp4"),
+                    "now_image": ("now-one.jpg", b"jpeg-now", "image/jpeg"),
+                },
             )
             second = await self.client.post(
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "2"},
-                files={"video": ("two.mp4", b"mp4", "video/mp4")},
+                files={
+                    "video": ("two.mp4", b"mp4", "video/mp4"),
+                    "now_image": ("now-two.jpg", b"jpeg-now", "image/jpeg"),
+                },
             )
             self.assertEqual(first.status_code, 202)
             self.assertEqual(second.status_code, 409)

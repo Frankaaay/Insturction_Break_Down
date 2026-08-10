@@ -27,6 +27,9 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         }, 1)
         self.assertIn("目标物底部", prompt)
         self.assertIn("随后 6 秒视频", prompt)
+        self.assertIn("NOW 画面中已经放回", prompt)
+        self.assertIn("窗口中途曾经满足、但结尾已不满足", prompt)
+        self.assertIn("最后 1 秒", prompt)
         self.assertIn("unknown", prompt)
 
     def test_result_timestamps_must_stay_inside_six_second_window(self):
@@ -37,6 +40,20 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 "evidence": [{"timestamp_s": 6.3, "observation": "超出窗口"}],
                 "completion_evidence_timestamp_s": 6.3,
             })
+        with self.assertRaisesRegex(ValueError, "最后 1 秒"):
+            validate_result({
+                "status": "succeeded", "description_zh": "中途拿起",
+                "failure_reason": None,
+                "evidence": [{"timestamp_s": 4.9, "observation": "水壶曾离开桌面"}],
+                "completion_evidence_timestamp_s": 4.9,
+            })
+        valid = validate_result({
+            "status": "succeeded", "description_zh": "结尾仍保持拿起",
+            "failure_reason": None,
+            "evidence": [{"timestamp_s": 5.5, "observation": "NOW 中水壶仍离开桌面"}],
+            "completion_evidence_timestamp_s": 5.5,
+        })
+        self.assertEqual(valid["status"], "succeeded")
 
     def test_action_specific_contracts_share_common_output_rules(self):
         carry = build_monitor_prompt({
@@ -77,13 +94,15 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             service._call_bailian = slow
             baseline = Path(directory) / "before.jpg"
             video = Path(directory) / "window.mp4"
+            now = Path(directory) / "now.jpg"
             baseline.write_bytes(b"image")
             video.write_bytes(b"video")
+            now.write_bytes(b"now")
             assignment = {"execution_id": "e", "attempt_id": "a", "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}}
-            await service.submit(assignment=assignment, camera_id="c", sequence=1, baseline_path=baseline, video_path=video, client_timings={})
-            await service.submit(assignment=assignment, camera_id="c", sequence=2, baseline_path=baseline, video_path=video, client_timings={})
+            await service.submit(assignment=assignment, camera_id="c", sequence=1, baseline_path=baseline, video_path=video, now_path=now, client_timings={})
+            await service.submit(assignment=assignment, camera_id="c", sequence=2, baseline_path=baseline, video_path=video, now_path=now, client_timings={})
             with self.assertRaises(RuntimeError):
-                await service.submit(assignment=assignment, camera_id="c", sequence=3, baseline_path=baseline, video_path=video, client_timings={})
+                await service.submit(assignment=assignment, camera_id="c", sequence=3, baseline_path=baseline, video_path=video, now_path=now, client_timings={})
             await service.close()
 
     async def test_terminal_result_enters_awaiting_confirmation(self):
@@ -108,15 +127,17 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             service._call_bailian = terminal
             baseline = Path(directory) / "before.jpg"
             video = Path(directory) / "window.mp4"
+            now = Path(directory) / "now.jpg"
             baseline.write_bytes(b"image")
             video.write_bytes(b"video")
+            now.write_bytes(b"now")
             assignment = {
                 "execution_id": "e", "attempt_id": "a", "action_id": "A_001",
                 "logic": 0, "slots": {"obj_a": "水壶"},
             }
             await service.submit(
                 assignment=assignment, camera_id="c", sequence=1,
-                baseline_path=baseline, video_path=video, client_timings={},
+                baseline_path=baseline, video_path=video, now_path=now, client_timings={},
             )
             for _ in range(50):
                 if not service.in_flight:

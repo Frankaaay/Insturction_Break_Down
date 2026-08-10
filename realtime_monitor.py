@@ -25,6 +25,7 @@ BAILIAN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/compl
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024
 MONITOR_WINDOW_SECONDS = 6.0
 MONITOR_TIMESTAMP_MAX = MONITOR_WINDOW_SECONDS + 0.2
+MONITOR_SUCCESS_EVIDENCE_MIN = MONITOR_WINDOW_SECONDS - 1.0
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -97,6 +98,8 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
     if status == "succeeded":
         if not isinstance(completion, (int, float)) or not 0 <= completion <= MONITOR_TIMESTAMP_MAX:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
+        if completion < MONITOR_SUCCESS_EVIDENCE_MIN:
+            raise ValueError("succeeded 的完成证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
     if not value.get("description_zh", "").strip() or not isinstance(value.get("evidence"), list) or not value["evidence"]:
@@ -153,6 +156,7 @@ class VisualMonitorService:
         sequence: int,
         baseline_path: Path,
         video_path: Path,
+        now_path: Path,
         client_timings: dict[str, float],
     ) -> None:
         if len(self._tasks) >= self.config.max_concurrency:
@@ -164,6 +168,7 @@ class VisualMonitorService:
                 sequence=sequence,
                 baseline_path=baseline_path,
                 video_path=video_path,
+                now_path=now_path,
                 client_timings=client_timings,
             ),
             name=f"visual-monitor:{assignment['execution_id']}:{sequence}",
@@ -181,7 +186,7 @@ class VisualMonitorService:
         }
         try:
             result, timings, actual_model, raw = await self._call_bailian(
-                assignment, job["sequence"], job["baseline_path"], job["video_path"]
+                assignment, job["sequence"], job["baseline_path"], job["video_path"], job["now_path"]
             )
             evidence_url = None
             completion = result.get("completion_evidence_timestamp_s")
@@ -195,6 +200,7 @@ class VisualMonitorService:
                 "model_requested": self.config.model,
                 "model_actual": actual_model,
                 "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
+                "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
                 "completion_evidence_url": evidence_url,
                 "timings_ms": {
                     **job["client_timings"],
@@ -233,21 +239,27 @@ class VisualMonitorService:
                 return
 
     async def _call_bailian(
-        self, assignment: dict[str, Any], sequence: int, baseline_path: Path, video_path: Path
+        self, assignment: dict[str, Any], sequence: int, baseline_path: Path,
+        video_path: Path, now_path: Path,
     ) -> tuple[dict[str, Any], dict[str, float], str, str]:
         key = os.getenv("DASHSCOPE_API_KEY", "")
         if not key:
             raise RuntimeError("服务器未配置 DASHSCOPE_API_KEY")
         prep_started = time.perf_counter()
-        image_data = base64.b64encode(baseline_path.read_bytes()).decode("ascii")
+        baseline_data = base64.b64encode(baseline_path.read_bytes()).decode("ascii")
         video_data = base64.b64encode(video_path.read_bytes()).decode("ascii")
+        now_data = base64.b64encode(now_path.read_bytes()).decode("ascii")
         prep_ms = (time.perf_counter() - prep_started) * 1000
         payload = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": build_monitor_prompt(assignment, sequence)},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
+                {"type": "text", "text": "BEFORE：本原子操作开始前的初始画面。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{baseline_data}"}},
+                {"type": "text", "text": "WINDOW：从 BEFORE 之后到当前检查点的 6 秒视频。"},
                 {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
+                {"type": "text", "text": "NOW：检查点结束时的当前画面；最终状态必须以此画面为准。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{now_data}"}},
             ]}],
             "enable_thinking": False,
             "temperature": 0,

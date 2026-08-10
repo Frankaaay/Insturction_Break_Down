@@ -10,6 +10,7 @@ let previewCameraId = null;
 let previewObjectUrl = null;
 let previewLastFrameAt = 0;
 let previewMeasuredFps = 0;
+let previewArrivalTimes = [];
 let previewReconnectTimer = null;
 
 const STATE_LABELS = {
@@ -73,6 +74,9 @@ function closeLivePreview() {
   const socket = previewSocket;
   previewSocket = null;
   previewCameraId = null;
+  previewLastFrameAt = 0;
+  previewMeasuredFps = 0;
+  previewArrivalTimes = [];
   if (socket) socket.close();
 }
 
@@ -108,9 +112,12 @@ function syncLivePreview() {
     const view = new DataView(packet, 0, 12);
     const capturedAt = view.getFloat64(0, false) * 1000;
     const arrival = Date.now();
-    if (previewLastFrameAt) {
-      const instantFps = 1000 / Math.max(1, arrival - previewLastFrameAt);
-      previewMeasuredFps = previewMeasuredFps ? previewMeasuredFps * 0.7 + instantFps * 0.3 : instantFps;
+    previewArrivalTimes.push(arrival);
+    const cutoff = arrival - 2000;
+    while (previewArrivalTimes.length > 1 && previewArrivalTimes[0] < cutoff) previewArrivalTimes.shift();
+    if (previewArrivalTimes.length > 1) {
+      previewMeasuredFps = (previewArrivalTimes.length - 1) * 1000
+        / Math.max(1, arrival - previewArrivalTimes[0]);
     }
     previewLastFrameAt = arrival;
     const oldUrl = previewObjectUrl;
@@ -369,7 +376,7 @@ function monitorControls() {
         ${livePreview}
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
-        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端每 7 秒上传一个完整 7 秒窗口，并触发一次百炼判断。")}</div>
+        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。")}</div>
         ${latest?.failure_reason ? `<div class="visual-failure">${esc(latest.failure_reason)}</div>` : ""}
         ${evidence}
         ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}

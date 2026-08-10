@@ -78,7 +78,9 @@ python monitor/realsense_client.py run --server https://112.74.61.202
 
 客户端使用 640×480@30 FPS 采集，向上传视频降采样为 6 FPS、H.264 CRF 28；每积累完整 6 秒便提交这 6 秒窗口，默认窗口和提交周期均为 6 秒。独立线程每 1 秒领取一次当前 assignment，编码和上传也在线程中进行，因此相机采集不会等待网络。每次切换步骤都会生成新的 generation、清空旧帧、重拍 BEFORE 并重新积累完整 6 秒窗口；旧 generation 的上传结果会被忽略。如果检查点到期时百炼仍在推理或本地上传槽繁忙，客户端每 0.5 秒重试并使用最新滚动窗口，不再浪费一个完整周期。VLM 返回 `succeeded` 或 `failed` 后，客户端停止 VLM 窗口的缓存、编码和百炼上传，但保持相机、实时预览与轻量 assignment 轮询；网页人工确认后进入下一步骤，或点击“判断不准确，继续监控”提升 monitor epoch、重拍 BEFORE。服务端以原子推理预留阻止同一 attempt 的并发或终态后重复百炼请求。服务器只允许 2 个跨相机并发推理，媒体保留 24 小时。当前已为 `A_001 Pick/logic0`、`A_003 Carry/logic0` 和 `A_002 Place/logic1` 建立动作专用视觉契约，其中 Carry 使用宽松成功和极窄失败边界。百炼默认 `qwen3.7-plus` 且关闭思考。网页显示最新状态、失败自然语言原因、完成证据帧和分段耗时，但必须由人点击确认后才推进操作链。
 
-同一采集循环还会分出独立实时预览：默认以 3 FPS、640×480、JPEG quality 65 压缩，通过二进制 WebSocket 上传，不使用 Base64。服务端和每个网页订阅者都只保留最新一帧；慢连接覆盖旧帧，不会阻塞相机或 VLM。网页显示实时画面、预览 FPS 和采集到展示的延迟。VLM 进入等待人工确认后，6 秒窗口和百炼请求暂停，但实时预览继续。可用 `--preview-fps`（最大 5）、`--preview-width`、`--preview-height` 和 `--preview-quality` 调整预览。
+同一采集循环还会分出独立实时预览：默认以 3 FPS、640×480、JPEG quality 65 压缩，通过二进制 WebSocket 上传，不使用 Base64。服务端和每个网页订阅者都只保留最新一帧；慢连接覆盖旧帧，不会阻塞相机或 VLM。网页显示最近 2 秒实际收到的预览 FPS 和采集到展示的延迟。VLM 进入等待人工确认后，6 秒窗口和百炼请求暂停，但实时预览继续。可用 `--preview-fps`（最大 10）、`--preview-width`、`--preview-height` 和 `--preview-quality` 调整预览。
+
+每个 VLM 检查点上传 `BEFORE`、6 秒 H.264 视频和独立 `NOW` 结尾帧。状态以 NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后 1 秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
 
 公网部署需要为 `/api/visual-monitor/live/` 转发 WebSocket Upgrade；当前服务器配置模板见 `deploy/nginx-instruction-breakdown.conf`。观看端使用 `OPERATOR_TOKEN`、采集端使用 `VISUAL_MONITOR_TOKEN`，认证消息在 WebSocket 建立后通过 TLS 发送，不放入 URL。
 

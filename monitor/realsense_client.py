@@ -345,13 +345,17 @@ class RealSenseMonitorClient:
 
     def upload_checkpoint(
         self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
-        frames: list[Any], window_start: float, window_end: float,
+        frames: list[Any], now_frame: Any, window_start: float, window_end: float,
     ) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
         try:
             encode_started = time.perf_counter()
             encode_mp4(frames, video_path, self.args.video_fps)
+            now_payload = io.BytesIO()
+            self.Image.fromarray(now_frame).save(
+                now_payload, format="JPEG", quality=82, optimize=True,
+            )
             encode_ms = (time.perf_counter() - encode_started) * 1000
             upload_started = time.perf_counter()
             with video_path.open("rb") as handle:
@@ -363,7 +367,10 @@ class RealSenseMonitorClient:
                         "window_started_at": utc_iso(window_start), "window_ended_at": utc_iso(window_end),
                         "capture_ms": (window_end - window_start) * 1000, "encode_ms": encode_ms,
                     },
-                    files={"video": (f"window-{sequence:04d}.mp4", handle, "video/mp4")},
+                    files={
+                        "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
+                        "now_image": (f"now-{sequence:04d}.jpg", now_payload.getvalue(), "image/jpeg"),
+                    },
                 )
             upload_ms = (time.perf_counter() - upload_started) * 1000
             if response.status_code == 429:
@@ -466,7 +473,7 @@ class RealSenseMonitorClient:
                         pending.add(workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,
-                            selected, window_start, now,
+                            selected, frame.copy(), window_start, now,
                         ))
                         next_checkpoint = now + self.args.cycle_seconds
                     else:
@@ -507,11 +514,11 @@ def main() -> int:
     if (
         args.window_seconds <= 0 or args.cycle_seconds <= 0
         or args.assignment_poll_seconds <= 0 or args.video_fps <= 0
-        or not 0 < args.preview_fps <= 5
+        or not 0 < args.preview_fps <= 10
         or args.preview_width <= 0 or args.preview_height <= 0
         or not 1 <= args.preview_quality <= 95
     ):
-        raise SystemExit("窗口、周期和视频 FPS 必须大于 0")
+        raise SystemExit("窗口、周期和视频 FPS 必须大于 0，实时预览 FPS 不能超过 10")
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     client = RealSenseMonitorClient(args)
     if args.command == "probe":
