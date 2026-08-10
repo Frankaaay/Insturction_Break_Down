@@ -90,6 +90,14 @@ def uploads_paused(assignment: dict[str, Any] | None) -> bool:
     return bool(assignment and assignment.get("monitor_state") == "awaiting_confirmation")
 
 
+def checkpoint_block_reason(assignment: dict[str, Any], pending_count: int) -> str | None:
+    if assignment.get("monitor_state") == "inferencing":
+        return "server inference still running"
+    if pending_count >= 2:
+        return "local upload slots busy"
+    return None
+
+
 class LivePreviewSender:
     """Encode and upload only the newest preview frame on an isolated thread."""
 
@@ -444,20 +452,26 @@ class RealSenseMonitorClient:
                     next_checkpoint = now + self.args.window_seconds
                     print(json.dumps({"event": "baseline.uploaded", "captured_at": utc_iso(now)}, ensure_ascii=False))
                 if now >= next_checkpoint:
-                    sequence += 1
+                    blocked = checkpoint_block_reason(assignment, len(pending))
+                    if blocked:
+                        print(json.dumps({"event": "checkpoint.deferred", "sequence": sequence + 1, "reason": blocked}, ensure_ascii=False))
+                        # Keep the latest rolling window and retry promptly after the
+                        # in-flight result/upload finishes; don't lose a full cycle.
+                        next_checkpoint = now + 0.5
+                        continue
                     window_start = now - self.args.window_seconds
                     selected = sample_window(ring, window_start, now, self.args.video_fps)
-                    if assignment.get("monitor_state") == "inferencing":
-                        print(json.dumps({"event": "checkpoint.skipped", "sequence": sequence, "reason": "server inference still running"}, ensure_ascii=False))
-                    elif len(pending) < 2 and selected:
+                    if selected:
+                        sequence += 1
                         pending.add(workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,
                             selected, window_start, now,
                         ))
+                        next_checkpoint = now + self.args.cycle_seconds
                     else:
-                        print(json.dumps({"event": "checkpoint.skipped", "sequence": sequence, "reason": "local upload slots busy"}, ensure_ascii=False))
-                    next_checkpoint += self.args.cycle_seconds
+                        print(json.dumps({"event": "checkpoint.deferred", "sequence": sequence + 1, "reason": "window has no frames"}, ensure_ascii=False))
+                        next_checkpoint = now + 0.5
         except KeyboardInterrupt:
             print(json.dumps({"event": "client.stopped"}, ensure_ascii=False))
         finally:
@@ -474,8 +488,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--server", default="https://112.74.61.202")
     result.add_argument("--token")
     result.add_argument("--serial")
-    result.add_argument("--window-seconds", type=float, default=7.0)
-    result.add_argument("--cycle-seconds", type=float, default=7.0)
+    result.add_argument("--window-seconds", type=float, default=6.0)
+    result.add_argument("--cycle-seconds", type=float, default=6.0)
     result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
     result.add_argument("--preview-fps", type=float, default=3.0)

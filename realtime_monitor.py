@@ -23,6 +23,8 @@ from visual_contracts import build_monitor_prompt
 
 BAILIAN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024
+MONITOR_WINDOW_SECONDS = 6.0
+MONITOR_TIMESTAMP_MAX = MONITOR_WINDOW_SECONDS + 0.2
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -42,12 +44,12 @@ OUTPUT_SCHEMA = {
                 "additionalProperties": False,
                 "required": ["timestamp_s", "observation"],
                 "properties": {
-                    "timestamp_s": {"type": "number", "minimum": 0, "maximum": 7.2},
+                    "timestamp_s": {"type": "number", "minimum": 0, "maximum": MONITOR_TIMESTAMP_MAX},
                     "observation": {"type": "string"},
                 },
             },
         },
-        "completion_evidence_timestamp_s": {"type": ["number", "null"], "minimum": 0, "maximum": 7.2},
+        "completion_evidence_timestamp_s": {"type": ["number", "null"], "minimum": 0, "maximum": MONITOR_TIMESTAMP_MAX},
     },
 }
 
@@ -93,7 +95,7 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("非 failed 状态的 failure_reason 必须为 null")
     completion = value.get("completion_evidence_timestamp_s")
     if status == "succeeded":
-        if not isinstance(completion, (int, float)) or not 0 <= completion <= 7.2:
+        if not isinstance(completion, (int, float)) or not 0 <= completion <= MONITOR_TIMESTAMP_MAX:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
@@ -104,7 +106,7 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
             not isinstance(item, dict)
             or set(item) != {"timestamp_s", "observation"}
             or not isinstance(item.get("timestamp_s"), (int, float))
-            or not 0 <= item["timestamp_s"] <= 7.2
+            or not 0 <= item["timestamp_s"] <= MONITOR_TIMESTAMP_MAX
             or not isinstance(item.get("observation"), str)
             or not item["observation"].strip()
         ):

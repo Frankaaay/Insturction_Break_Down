@@ -163,7 +163,7 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
     if missing:
         raise ValueError(f"动作契约缺少 slots: {', '.join(missing)}")
     slot_text = "，".join(f"{name}={slots[name]}" for name in contract.required_slots)
-    return f"""你是实时视觉观察器。只基于给出的本步骤 BEFORE 初始图和随后 7 秒视频，判断当前原子操作的视觉状态。
+    return f"""你是实时视觉观察器。只基于给出的本步骤 BEFORE 初始图和随后 6 秒视频，判断当前原子操作的视觉状态。
 
 动作：{contract.name}（{contract.contract_key}，contract v{contract.version}）
 操作描述：{assignment.get('zh') or assignment.get('action') or contract.name}
@@ -194,7 +194,7 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 
 输出规则：
 - evidence 只写直接可见事实，不写隐藏推理、操作意图或控制建议。
-- evidence 时间戳和 completion_evidence_timestamp_s 都相对这段 7 秒视频开头，范围为 0 到 7 秒。
+- evidence 时间戳和 completion_evidence_timestamp_s 都相对这段 6 秒视频开头，范围为 0 到 6 秒。
 - 只有 succeeded 才填写 completion_evidence_timestamp_s；其他状态必须为 null。
 - 非 failed 状态的 failure_reason 必须为 null。
 - 不决定继续、推进、停止或恢复；这些属于独立控制层。

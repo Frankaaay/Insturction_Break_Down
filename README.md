@@ -23,7 +23,7 @@
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
 - **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
-- **RealSense Visual Monitor**:Windows 客户端每 7 秒上传一个完整 7 秒 RGB 视频窗口，服务器调用百炼并通过 SSE 展示观察结果；VLM 不自动推进任务
+- **RealSense Visual Monitor**:Windows 客户端每 6 秒上传一个完整 6 秒 RGB 视频窗口，服务器调用百炼并通过 SSE 展示观察结果；VLM 不自动推进任务
 
 ## 快速开始
 
@@ -59,7 +59,7 @@ Windows 端直接使用 `pyrealsense2`，不需要安装 ROS 或 `realsense-ros`
 python -m pip install -r monitor/requirements-realsense.txt
 ```
 
-服务器 `.env` 至少配置 `DASHSCOPE_API_KEY` 和 `VISUAL_MONITOR_TOKEN`。本地只配置同一个 monitor token，不保存百炼 key。先测 7 秒视频的采集、编码和上传链路（不会请求百炼）：
+服务器 `.env` 至少配置 `DASHSCOPE_API_KEY` 和 `VISUAL_MONITOR_TOKEN`。本地只配置同一个 monitor token，不保存百炼 key。先测 6 秒视频的采集、编码和上传链路（不会请求百炼）：
 
 ```powershell
 python monitor/realsense_client.py probe --server https://112.74.61.202
@@ -76,9 +76,9 @@ python monitor/realsense_client.py probe --server https://112.74.61.202
 python monitor/realsense_client.py run --server https://112.74.61.202
 ```
 
-客户端使用 640×480@30 FPS 采集，向上传视频降采样为 6 FPS、H.264 CRF 28；每积累完整 7 秒便提交这 7 秒窗口，默认窗口和提交周期均为 7 秒。独立线程每 1 秒领取一次当前 assignment，编码和上传也在线程中进行，因此相机采集不会等待网络。每次切换步骤都会生成新的 generation、清空旧帧、重拍 BEFORE 并重新积累完整 7 秒窗口；旧 generation 的上传结果会被忽略。VLM 返回 `succeeded` 或 `failed` 后，客户端停止 VLM 窗口的缓存、编码和百炼上传，但保持相机、实时预览与轻量 assignment 轮询；网页人工确认后进入下一步骤，或点击“判断不准确，继续监控”提升 monitor epoch、重拍 BEFORE。服务端以原子推理预留阻止同一 attempt 的并发或终态后重复百炼请求。服务器只允许 2 个跨相机并发推理，媒体保留 24 小时。当前已为 `A_001 Pick/logic0`、`A_003 Carry/logic0` 和 `A_002 Place/logic1` 建立动作专用视觉契约，其中 Carry 使用宽松成功和极窄失败边界。百炼默认 `qwen3.7-plus` 且关闭思考。网页显示最新状态、失败自然语言原因、完成证据帧和分段耗时，但必须由人点击确认后才推进操作链。
+客户端使用 640×480@30 FPS 采集，向上传视频降采样为 6 FPS、H.264 CRF 28；每积累完整 6 秒便提交这 6 秒窗口，默认窗口和提交周期均为 6 秒。独立线程每 1 秒领取一次当前 assignment，编码和上传也在线程中进行，因此相机采集不会等待网络。每次切换步骤都会生成新的 generation、清空旧帧、重拍 BEFORE 并重新积累完整 6 秒窗口；旧 generation 的上传结果会被忽略。如果检查点到期时百炼仍在推理或本地上传槽繁忙，客户端每 0.5 秒重试并使用最新滚动窗口，不再浪费一个完整周期。VLM 返回 `succeeded` 或 `failed` 后，客户端停止 VLM 窗口的缓存、编码和百炼上传，但保持相机、实时预览与轻量 assignment 轮询；网页人工确认后进入下一步骤，或点击“判断不准确，继续监控”提升 monitor epoch、重拍 BEFORE。服务端以原子推理预留阻止同一 attempt 的并发或终态后重复百炼请求。服务器只允许 2 个跨相机并发推理，媒体保留 24 小时。当前已为 `A_001 Pick/logic0`、`A_003 Carry/logic0` 和 `A_002 Place/logic1` 建立动作专用视觉契约，其中 Carry 使用宽松成功和极窄失败边界。百炼默认 `qwen3.7-plus` 且关闭思考。网页显示最新状态、失败自然语言原因、完成证据帧和分段耗时，但必须由人点击确认后才推进操作链。
 
-同一采集循环还会分出独立实时预览：默认以 3 FPS、640×480、JPEG quality 65 压缩，通过二进制 WebSocket 上传，不使用 Base64。服务端和每个网页订阅者都只保留最新一帧；慢连接覆盖旧帧，不会阻塞相机或 VLM。网页显示实时画面、预览 FPS 和采集到展示的延迟。VLM 进入等待人工确认后，7 秒窗口和百炼请求暂停，但实时预览继续。可用 `--preview-fps`（最大 5）、`--preview-width`、`--preview-height` 和 `--preview-quality` 调整预览。
+同一采集循环还会分出独立实时预览：默认以 3 FPS、640×480、JPEG quality 65 压缩，通过二进制 WebSocket 上传，不使用 Base64。服务端和每个网页订阅者都只保留最新一帧；慢连接覆盖旧帧，不会阻塞相机或 VLM。网页显示实时画面、预览 FPS 和采集到展示的延迟。VLM 进入等待人工确认后，6 秒窗口和百炼请求暂停，但实时预览继续。可用 `--preview-fps`（最大 5）、`--preview-width`、`--preview-height` 和 `--preview-quality` 调整预览。
 
 公网部署需要为 `/api/visual-monitor/live/` 转发 WebSocket Upgrade；当前服务器配置模板见 `deploy/nginx-instruction-breakdown.conf`。观看端使用 `OPERATOR_TOKEN`、采集端使用 `VISUAL_MONITOR_TOKEN`，认证消息在 WebSocket 建立后通过 TLS 发送，不放入 URL。
 
@@ -102,7 +102,7 @@ HTTP API(供其他程序调用):
 - `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
 - `POST /api/visual-monitor/claim` — RealSense 客户端领取当前 Visual Pick attempt
 - `POST /api/visual-monitor/baseline` — 上传操作开始前的 JPEG
-- `POST /api/visual-monitor/checkpoints` — 上传 7 秒 H.264 检查窗口并异步触发百炼
+- `POST /api/visual-monitor/checkpoints` — 上传 6 秒 H.264 检查窗口并异步触发百炼
 - `POST /api/visual-monitor/upload-probe` — 只测采集/编码/上传，不请求模型
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:

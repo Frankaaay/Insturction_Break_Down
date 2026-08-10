@@ -26,7 +26,17 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}
         }, 1)
         self.assertIn("目标物底部", prompt)
+        self.assertIn("随后 6 秒视频", prompt)
         self.assertIn("unknown", prompt)
+
+    def test_result_timestamps_must_stay_inside_six_second_window(self):
+        with self.assertRaises(ValueError):
+            validate_result({
+                "status": "succeeded", "description_zh": "已经完成",
+                "failure_reason": None,
+                "evidence": [{"timestamp_s": 6.3, "observation": "超出窗口"}],
+                "completion_evidence_timestamp_s": 6.3,
+            })
 
     def test_action_specific_contracts_share_common_output_rules(self):
         carry = build_monitor_prompt({

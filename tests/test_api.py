@@ -177,8 +177,8 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "execution_id": created["execution_id"], "attempt_id": attempt_id,
                 "camera_id": "cam-1", "sequence": "1",
                 "window_started_at": "2026-08-06T00:00:00Z",
-                "window_ended_at": "2026-08-06T00:00:07Z",
-                "capture_ms": "7000", "encode_ms": "80",
+                "window_ended_at": "2026-08-06T00:00:06Z",
+                "capture_ms": "6000", "encode_ms": "80",
             }, files={"video": ("window.mp4", b"mp4", "video/mp4")})
             self.assertEqual(checkpoint.status_code, 202)
             for _ in range(20):
@@ -276,7 +276,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             form = {
                 "execution_id": created["execution_id"], "attempt_id": attempt_id,
                 "camera_id": "cam-one", "window_started_at": "2026-08-10T00:00:00Z",
-                "window_ended_at": "2026-08-10T00:00:07Z", "capture_ms": "7000",
+                "window_ended_at": "2026-08-10T00:00:06Z", "capture_ms": "6000",
                 "encode_ms": "80",
             }
             first = await self.client.post(

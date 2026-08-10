@@ -2,7 +2,7 @@ import unittest
 from collections import deque
 import struct
 
-from monitor.realsense_client import LivePreviewSender, assignment_identity, parser, sample_window, uploads_paused
+from monitor.realsense_client import LivePreviewSender, assignment_identity, checkpoint_block_reason, parser, sample_window, uploads_paused
 
 
 class FakePreviewImage:
@@ -22,10 +22,10 @@ class FakeImageModule:
 
 
 class RealSenseClientTests(unittest.TestCase):
-    def test_default_window_and_submission_cycle_are_both_seven_seconds(self):
+    def test_default_window_and_submission_cycle_are_both_six_seconds(self):
         args = parser().parse_args(["probe"])
-        self.assertEqual(args.window_seconds, 7.0)
-        self.assertEqual(args.cycle_seconds, 7.0)
+        self.assertEqual(args.window_seconds, 6.0)
+        self.assertEqual(args.cycle_seconds, 6.0)
         self.assertEqual(args.assignment_poll_seconds, 1.0)
         self.assertEqual(args.preview_fps, 3.0)
         self.assertEqual((args.preview_width, args.preview_height), (640, 480))
@@ -47,6 +47,17 @@ class RealSenseClientTests(unittest.TestCase):
         self.assertFalse(uploads_paused({"monitor_state": "inferencing"}))
         self.assertFalse(uploads_paused({"monitor_state": "observing"}))
 
+    def test_inference_or_busy_upload_defers_without_consuming_a_cycle(self):
+        self.assertEqual(
+            checkpoint_block_reason({"monitor_state": "inferencing"}, 0),
+            "server inference still running",
+        )
+        self.assertEqual(
+            checkpoint_block_reason({"monitor_state": "observing"}, 2),
+            "local upload slots busy",
+        )
+        self.assertIsNone(checkpoint_block_reason({"monitor_state": "observing"}, 0))
+
     def test_preview_packet_is_binary_jpeg_with_timestamp_and_sequence(self):
         args = parser().parse_args(["run", "--server", "https://example.com"])
         sender = LivePreviewSender(args, "secret", "camera:one", FakeImageModule)
@@ -62,13 +73,13 @@ class RealSenseClientTests(unittest.TestCase):
             "wss://example.com/api/visual-monitor/live/ingest/camera%3Aone",
         )
 
-    def test_seven_second_window_is_downsampled_to_six_fps(self):
+    def test_six_second_window_is_downsampled_to_six_fps(self):
         frames = deque(
             (index / 30, index)
-            for index in range(211)
+            for index in range(181)
         )
-        selected = sample_window(frames, 0.0, 7.0, fps=6)
-        self.assertEqual(len(selected), 42)
+        selected = sample_window(frames, 0.0, 6.0, fps=6)
+        self.assertEqual(len(selected), 36)
 
     def test_empty_window_returns_no_frames(self):
-        self.assertEqual(sample_window(deque(), 0, 7, fps=6), [])
+        self.assertEqual(sample_window(deque(), 0, 6, fps=6), [])
