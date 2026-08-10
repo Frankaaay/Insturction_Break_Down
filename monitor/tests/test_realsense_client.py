@@ -2,10 +2,23 @@ import unittest
 from collections import deque
 import struct
 
-import numpy as np
-from PIL import Image
-
 from monitor.realsense_client import LivePreviewSender, assignment_identity, parser, sample_window, uploads_paused
+
+
+class FakePreviewImage:
+    size = (640, 480)
+
+    def save(self, payload, **kwargs):
+        payload.write(b"\xff\xd8preview-jpeg\xff\xd9")
+
+
+class FakeImageModule:
+    class Resampling:
+        BILINEAR = 1
+
+    @staticmethod
+    def fromarray(frame):
+        return FakePreviewImage()
 
 
 class RealSenseClientTests(unittest.TestCase):
@@ -36,8 +49,8 @@ class RealSenseClientTests(unittest.TestCase):
 
     def test_preview_packet_is_binary_jpeg_with_timestamp_and_sequence(self):
         args = parser().parse_args(["run", "--server", "https://example.com"])
-        sender = LivePreviewSender(args, "secret", "camera:one", Image)
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        sender = LivePreviewSender(args, "secret", "camera:one", FakeImageModule)
+        frame = object()
         packet = sender._encode_packet(7, 1234.5, frame)
         captured_at, sequence = struct.unpack("!dI", packet[:12])
         self.assertEqual(captured_at, 1234.5)
