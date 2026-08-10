@@ -9,6 +9,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -70,6 +71,60 @@ def sample_window(buffer: deque, start: float, end: float, fps: int = 6) -> list
             cursor += 1
         result.append(source[cursor][1])
     return result
+
+
+def assignment_identity(assignment: dict[str, Any] | None) -> tuple[str, str] | None:
+    if not assignment:
+        return None
+    return str(assignment["execution_id"]), str(assignment["attempt_id"])
+
+
+class AssignmentPoller:
+    """Poll assignments independently so camera capture never waits on the server."""
+
+    def __init__(self, args: argparse.Namespace, token: str, camera_id: str) -> None:
+        self.args = args
+        self.token = token
+        self.camera_id = camera_id
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._assignment: dict[str, Any] | None = None
+        self._generation = 0
+        self._thread = threading.Thread(target=self._run, name="assignment-poller", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(2.0, self.args.http_timeout + 1.0))
+
+    def snapshot(self) -> tuple[int, dict[str, Any] | None]:
+        with self._lock:
+            return self._generation, self._assignment
+
+    def _run(self) -> None:
+        with httpx.Client(
+            base_url=self.args.server.rstrip("/"),
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=self.args.http_timeout,
+            verify=not self.args.insecure,
+            trust_env=not self.args.no_proxy,
+        ) as client:
+            while not self._stop.is_set():
+                try:
+                    response = client.post("/api/visual-monitor/claim", json={"camera_id": self.camera_id})
+                    response.raise_for_status()
+                    assignment = response.json().get("assignment")
+                    with self._lock:
+                        if assignment_identity(assignment) != assignment_identity(self._assignment):
+                            self._generation += 1
+                            self._assignment = assignment
+                        elif assignment is not None:
+                            self._assignment = assignment
+                except Exception as exc:
+                    print(json.dumps({"event": "assignment.poll_error", "error": str(exc)}, ensure_ascii=False))
+                self._stop.wait(self.args.assignment_poll_seconds)
 
 
 class RealSenseMonitorClient:
@@ -168,7 +223,7 @@ class RealSenseMonitorClient:
         response.raise_for_status()
 
     def upload_checkpoint(
-        self, assignment: dict[str, Any], camera_id: str, sequence: int,
+        self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
         frames: list[Any], window_start: float, window_end: float,
     ) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -191,11 +246,11 @@ class RealSenseMonitorClient:
                 )
             upload_ms = (time.perf_counter() - upload_started) * 1000
             if response.status_code == 429:
-                return {"accepted": False, "sequence": sequence, "reason": response.json().get("detail"), "upload_roundtrip_ms": round(upload_ms, 1)}
+                return {"accepted": False, "generation": generation, "sequence": sequence, "reason": response.json().get("detail"), "upload_roundtrip_ms": round(upload_ms, 1)}
             if response.status_code == 409:
-                return {"accepted": False, "stale": True, "sequence": sequence, "reason": response.json().get("detail"), "upload_roundtrip_ms": round(upload_ms, 1)}
+                return {"accepted": False, "stale": True, "generation": generation, "sequence": sequence, "reason": response.json().get("detail"), "upload_roundtrip_ms": round(upload_ms, 1)}
             response.raise_for_status()
-            return {**response.json(), "upload_roundtrip_ms": round(upload_ms, 1), "encoded_bytes": video_path.stat().st_size, "frames": len(frames)}
+            return {**response.json(), "generation": generation, "upload_roundtrip_ms": round(upload_ms, 1), "encoded_bytes": video_path.stat().st_size, "frames": len(frames)}
         finally:
             video_path.unlink(missing_ok=True)
 
@@ -204,11 +259,14 @@ class RealSenseMonitorClient:
         self.warm_up(pipeline)
         ring: deque = deque()
         assignment = None
+        generation = 0
         baseline_sent = False
         next_checkpoint = None
         sequence = 0
         workers = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         pending: set[concurrent.futures.Future] = set()
+        poller = AssignmentPoller(self.args, self.token, camera_id)
+        poller.start()
         print(json.dumps({"event": "camera.ready", "camera_id": camera_id}, ensure_ascii=False))
         try:
             while True:
@@ -217,6 +275,18 @@ class RealSenseMonitorClient:
                     continue
                 now = time.time()
                 frame = self.np.asanyarray(color.get_data()).copy()
+                polled_generation, polled_assignment = poller.snapshot()
+                if polled_generation != generation:
+                    generation = polled_generation
+                    assignment = polled_assignment
+                    baseline_sent = False
+                    next_checkpoint = None
+                    sequence = 0
+                    ring.clear()
+                    if assignment:
+                        print(json.dumps({"event": "assignment.claimed", "generation": generation, **assignment}, ensure_ascii=False))
+                    else:
+                        print(json.dumps({"event": "assignment.cleared", "generation": generation}, ensure_ascii=False))
                 ring.append((now, frame))
                 while ring and ring[0][0] < now - self.args.window_seconds - 1:
                     ring.popleft()
@@ -225,21 +295,14 @@ class RealSenseMonitorClient:
                         pending.remove(future)
                         try:
                             result = future.result()
-                            print(json.dumps({"event": "checkpoint.uploaded", **result}, ensure_ascii=False))
-                            if result.get("stale"):
-                                assignment = None
-                                baseline_sent = False
-                                next_checkpoint = None
-                                sequence = 0
+                            if result.get("generation") != generation:
+                                print(json.dumps({"event": "checkpoint.stale_ignored", **result}, ensure_ascii=False))
+                            else:
+                                print(json.dumps({"event": "checkpoint.uploaded", **result}, ensure_ascii=False))
                         except Exception as exc:
                             print(json.dumps({"event": "checkpoint.error", "error": str(exc)}, ensure_ascii=False))
                 if assignment is None:
-                    assignment = self.claim(camera_id)
-                    if assignment:
-                        print(json.dumps({"event": "assignment.claimed", **assignment}, ensure_ascii=False))
-                    else:
-                        time.sleep(0.5)
-                        continue
+                    continue
                 if not baseline_sent:
                     self.upload_baseline(assignment, camera_id, frame, now)
                     baseline_sent = True
@@ -252,6 +315,7 @@ class RealSenseMonitorClient:
                     if len(pending) < 2 and selected:
                         pending.add(workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
+                            generation,
                             selected, window_start, now,
                         ))
                     else:
@@ -260,6 +324,7 @@ class RealSenseMonitorClient:
         except KeyboardInterrupt:
             print(json.dumps({"event": "client.stopped"}, ensure_ascii=False))
         finally:
+            poller.stop()
             pipeline.stop()
             workers.shutdown(wait=True, cancel_futures=True)
             self.http.close()
@@ -273,6 +338,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--serial")
     result.add_argument("--window-seconds", type=float, default=7.0)
     result.add_argument("--cycle-seconds", type=float, default=7.0)
+    result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
     result.add_argument("--http-timeout", type=float, default=30.0)
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")
@@ -282,7 +348,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
-    if args.window_seconds <= 0 or args.cycle_seconds <= 0 or args.video_fps <= 0:
+    if args.window_seconds <= 0 or args.cycle_seconds <= 0 or args.assignment_poll_seconds <= 0 or args.video_fps <= 0:
         raise SystemExit("窗口、周期和视频 FPS 必须大于 0")
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     client = RealSenseMonitorClient(args)

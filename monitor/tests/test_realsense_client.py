@@ -1,7 +1,7 @@
 import unittest
 from collections import deque
 
-from monitor.realsense_client import parser, sample_window
+from monitor.realsense_client import assignment_identity, parser, sample_window
 
 
 class RealSenseClientTests(unittest.TestCase):
@@ -9,6 +9,13 @@ class RealSenseClientTests(unittest.TestCase):
         args = parser().parse_args(["probe"])
         self.assertEqual(args.window_seconds, 7.0)
         self.assertEqual(args.cycle_seconds, 7.0)
+        self.assertEqual(args.assignment_poll_seconds, 1.0)
+
+    def test_assignment_identity_isolated_by_attempt(self):
+        first = {"execution_id": "execution-1", "attempt_id": "attempt-1"}
+        second = {"execution_id": "execution-1", "attempt_id": "attempt-2"}
+        self.assertNotEqual(assignment_identity(first), assignment_identity(second))
+        self.assertIsNone(assignment_identity(None))
 
     def test_seven_second_window_is_downsampled_to_six_fps(self):
         frames = deque(

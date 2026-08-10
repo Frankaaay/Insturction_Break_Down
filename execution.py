@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from visual_contracts import supports_visual_contract, visual_contract_metadata
+
 
 class ExecutionNotFoundError(KeyError):
     """执行会话不存在。"""
@@ -229,7 +231,7 @@ class ExecutionManager:
             return self._snapshot_locked(execution)
 
     async def claim_visual_monitor(self, camera_id: str) -> dict[str, Any] | None:
-        """Claim the oldest active visual-monitor Pick attempt."""
+        """Claim the oldest active attempt with a registered visual contract."""
         for execution_id in list(self._executions):
             execution = self._executions[execution_id]
             async with self._locks[execution_id]:
@@ -242,8 +244,9 @@ class ExecutionManager:
                 ):
                     continue
                 step = self._current_step_locked(execution)
-                if step.get("action_id") != "A_001":
+                if not supports_visual_contract(step.get("action_id"), step.get("logic")):
                     continue
+                contract_meta = visual_contract_metadata(step["action_id"], step["logic"])
                 monitor = attempt.get("visual_monitor")
                 if monitor and monitor.get("camera_id") != camera_id:
                     continue
@@ -254,6 +257,7 @@ class ExecutionManager:
                         "latest": None,
                         "baseline_url": None,
                         "claimed_at": _iso(),
+                        **contract_meta,
                     }
                     self._record_event_locked(execution, "visual_monitor.claimed", {
                         "step_id": step["step_id"],
@@ -265,10 +269,12 @@ class ExecutionManager:
                     "step_id": step["step_id"],
                     "attempt_id": attempt["attempt_id"],
                     "action_id": step.get("action_id"),
+                    "logic": step.get("logic"),
                     "action": step.get("action"),
                     "zh": step.get("zh"),
                     "slots": copy.deepcopy(step.get("slots", {})),
                     "previous_status": ((attempt.get("visual_monitor") or {}).get("latest") or {}).get("status"),
+                    **contract_meta,
                 }
         return None
 

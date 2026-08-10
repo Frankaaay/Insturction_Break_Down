@@ -27,6 +27,15 @@ STEPS = [
     },
 ]
 
+CHAIN_STEPS = [
+    STEPS[0],
+    {
+        "action_id": "A_003", "action": "Carry", "logic": 0,
+        "slots": {"obj_a": "水壶"}, "zh": "搬运水壶", "en": "Carry the kettle.",
+    },
+    STEPS[1],
+]
+
 WORKFLOW = {
     "workflow_id": "grasparm.auto-pick",
     "version": "3",
@@ -99,6 +108,47 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(snapshot["state"], "running")
         self.assertEqual(snapshot["steps"][0]["status"], "active")
+
+    async def test_visual_monitor_claims_full_pick_carry_place_chain(self):
+        execution = await self.manager.create(
+            "拿起并搬运水壶到桌子", "test", None, CHAIN_STEPS,
+            execution_mode="visual_monitor",
+        )
+        snapshot = await self.manager.start(execution["execution_id"])
+        previous_attempt_id = None
+        expected = [("A_001", 0), ("A_003", 0), ("A_002", 1)]
+        for index, (action_id, logic) in enumerate(expected):
+            assignment = await self.manager.claim_visual_monitor("camera-1")
+            self.assertEqual((assignment["action_id"], assignment["logic"]), (action_id, logic))
+            self.assertIn("contract_key", assignment)
+            if previous_attempt_id:
+                self.assertNotEqual(assignment["attempt_id"], previous_attempt_id)
+            previous_attempt_id = assignment["attempt_id"]
+            snapshot = (await self.manager.report(
+                execution["execution_id"], report_id=f"chain-{index}",
+                step_id=assignment["step_id"], attempt_id=assignment["attempt_id"],
+                outcome="success", source="human",
+            ))["execution"]
+        self.assertEqual(snapshot["state"], "completed")
+
+    async def test_stale_visual_result_cannot_overwrite_next_step(self):
+        execution = await self.manager.create(
+            "拿起并搬运水壶", "test", None, CHAIN_STEPS[:2],
+            execution_mode="visual_monitor",
+        )
+        await self.manager.start(execution["execution_id"])
+        old = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.report(
+            execution["execution_id"], report_id="advance", step_id=old["step_id"],
+            attempt_id=old["attempt_id"], outcome="success", source="human",
+        )
+        new = await self.manager.claim_visual_monitor("camera-1")
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.update_visual_monitor(
+                execution["execution_id"], attempt_id=old["attempt_id"], camera_id="camera-1",
+                patch={"latest": {"status": "succeeded"}}, event_type="visual_monitor.observation",
+            )
+        self.assertEqual(new["action_id"], "A_003")
 
     async def test_mode_can_only_change_before_start(self):
         execution = await self.manager.create("拿起水壶", "test", None, STEPS[:1])

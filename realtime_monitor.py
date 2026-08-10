@@ -17,6 +17,9 @@ from uuid import uuid4
 
 import httpx
 
+from execution import ExecutionConflictError
+from visual_contracts import build_monitor_prompt
+
 
 BAILIAN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024
@@ -107,25 +110,6 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError("模型 evidence 条目非法")
     return value
-
-
-def build_pick_prompt(assignment: dict[str, Any], sequence: int) -> str:
-    target = str((assignment.get("slots") or {}).get("obj_a") or "目标物体")
-    return f"""你是实时视觉观察器，只基于给出的 BEFORE 初始图和随后 7 秒视频判断当前原子操作。
-
-原子操作：{assignment.get('zh') or assignment.get('action') or '拿起目标物体'}
-目标物体：{target}
-检查点序号：{sequence}
-上一次状态：{assignment.get('previous_status') or '无'}（只作为时序参考，本次仍以可见证据为准）
-
-状态定义：
-- in_progress：还在尝试，或者抓空、滑脱、掉落后仍可能继续完成。
-- succeeded：视频中明确看见目标物体已经离开原支撑面，并稳定地被手拿住。手靠近、手合拢、动作停止都不等于成功。
-- failed：当前可见证据已经表明本次原子操作失败，例如明确拿起了别的物体而目标物体仍留在原处。失败原因用自然语言描述，不使用预定义枚举。
-- unknown：关键区域被手、身体或其他物体遮挡，无法看清目标物体底部、原支撑面或二者间隙，因此不能可靠确认是否离开支撑面。
-
-特别注意：如果成功条件所需的“目标物体底部—支撑面间隙”不可见，即使动作看起来像拿起，也必须返回 unknown，不能猜测。
-evidence 只写直接可见事实；时间戳是相对这段 7 秒视频开头的秒数。只返回符合 JSON Schema 的 JSON。"""
 
 
 class VisualMonitorService:
@@ -219,13 +203,23 @@ class VisualMonitorService:
             }
             log_path = job["video_path"].with_suffix(".json")
             log_path.write_text(json.dumps({"latest": latest, "raw": raw}, ensure_ascii=False, indent=2), encoding="utf-8")
-            await self.update_callback(**common, patch={"state": "observing", "latest": latest}, event_type="visual_monitor.observation")
+            try:
+                await self.update_callback(**common, patch={"state": "observing", "latest": latest}, event_type="visual_monitor.observation")
+            except ExecutionConflictError:
+                # The operator may have confirmed the step while inference was in flight.
+                # The execution manager rejects that stale attempt; never let it overwrite
+                # the newly active step or turn the completed job into a second error update.
+                return
         except Exception as exc:
-            await self.update_callback(
-                **common,
-                patch={"state": "error", "latest": {"status": "unknown", "description_zh": "视觉模型请求失败", "failure_reason": None, "error": str(exc), "sequence": job["sequence"], "observed_at": utc_iso()}},
-                event_type="visual_monitor.error",
-            )
+            try:
+                await self.update_callback(
+                    **common,
+                    patch={"state": "error", "latest": {"status": "unknown", "description_zh": "视觉模型请求失败", "failure_reason": None, "error": str(exc), "sequence": job["sequence"], "observed_at": utc_iso()}},
+                    event_type="visual_monitor.error",
+                )
+            except ExecutionConflictError:
+                # A stale attempt is expected during a fast human-confirmed transition.
+                return
 
     async def _call_bailian(
         self, assignment: dict[str, Any], sequence: int, baseline_path: Path, video_path: Path
@@ -240,7 +234,7 @@ class VisualMonitorService:
         payload = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": build_pick_prompt(assignment, sequence)},
+                {"type": "text", "text": build_monitor_prompt(assignment, sequence)},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
                 {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
             ]}],
