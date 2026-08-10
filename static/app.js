@@ -5,6 +5,12 @@ let execution = null;
 let eventSource = null;
 let commandBusy = false;
 let countdownTimer = null;
+let previewSocket = null;
+let previewCameraId = null;
+let previewObjectUrl = null;
+let previewLastFrameAt = 0;
+let previewMeasuredFps = 0;
+let previewReconnectTimer = null;
 
 const STATE_LABELS = {
   ready: "待确认",
@@ -48,6 +54,89 @@ function esc(value) {
 function randomId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+function desiredPreviewCamera() {
+  if (execution?.execution_mode !== "visual_monitor") return null;
+  return execution?.active_attempt?.visual_monitor?.camera_id || null;
+}
+
+function setPreviewStatus(text, kind = "wait") {
+  const node = $("#livePreviewStatus");
+  if (!node) return;
+  node.textContent = text;
+  node.className = `live-preview-status ${kind}`;
+}
+
+function closeLivePreview() {
+  if (previewReconnectTimer) clearTimeout(previewReconnectTimer);
+  previewReconnectTimer = null;
+  const socket = previewSocket;
+  previewSocket = null;
+  previewCameraId = null;
+  if (socket) socket.close();
+}
+
+function syncLivePreview() {
+  const cameraId = desiredPreviewCamera();
+  const image = $("#livePreviewImage");
+  if (!cameraId || !image) {
+    closeLivePreview();
+    return;
+  }
+  if (previewObjectUrl) image.src = previewObjectUrl;
+  if (previewCameraId === cameraId && previewSocket && previewSocket.readyState <= WebSocket.OPEN) return;
+  closeLivePreview();
+  previewCameraId = cameraId;
+  setPreviewStatus("连接实时画面…");
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${scheme}://${location.host}/api/visual-monitor/live/view/${encodeURIComponent(cameraId)}`);
+  socket.binaryType = "arraybuffer";
+  previewSocket = socket;
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ token: localStorage.getItem("operatorToken") || "" }));
+  };
+  socket.onmessage = (event) => {
+    if (previewSocket !== socket) return;
+    if (typeof event.data === "string") {
+      try {
+        if (JSON.parse(event.data).type === "ready") setPreviewStatus("实时画面已连接", "live");
+      } catch (_) { /* ignore malformed control messages */ }
+      return;
+    }
+    const packet = event.data;
+    if (!(packet instanceof ArrayBuffer) || packet.byteLength <= 12) return;
+    const view = new DataView(packet, 0, 12);
+    const capturedAt = view.getFloat64(0, false) * 1000;
+    const arrival = Date.now();
+    if (previewLastFrameAt) {
+      const instantFps = 1000 / Math.max(1, arrival - previewLastFrameAt);
+      previewMeasuredFps = previewMeasuredFps ? previewMeasuredFps * 0.7 + instantFps * 0.3 : instantFps;
+    }
+    previewLastFrameAt = arrival;
+    const oldUrl = previewObjectUrl;
+    previewObjectUrl = URL.createObjectURL(new Blob([packet.slice(12)], { type: "image/jpeg" }));
+    const currentImage = $("#livePreviewImage");
+    if (currentImage) currentImage.src = previewObjectUrl;
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    const latency = Math.max(0, arrival - capturedAt);
+    setPreviewStatus(`${previewMeasuredFps.toFixed(1)} FPS · ${Math.round(latency)} ms`, "live");
+  };
+  socket.onclose = (event) => {
+    if (previewSocket !== socket) return;
+    previewSocket = null;
+    setPreviewStatus(event.code === 4401 ? "需要操作员认证" : "实时画面重连中…", "wait");
+    if (desiredPreviewCamera() === cameraId) {
+      previewReconnectTimer = setTimeout(syncLivePreview, event.code === 4401 ? 3000 : 1000);
+    }
+  };
+  socket.onerror = () => setPreviewStatus("实时画面连接异常", "bad");
+}
+
+setInterval(() => {
+  if (desiredPreviewCamera() && previewLastFrameAt && Date.now() - previewLastFrameAt > 2000) {
+    setPreviewStatus("画面超过2秒未更新", "bad");
+  }
+}, 1000);
 
 function isOpenSession(item = execution) {
   return item && !["completed", "terminated"].includes(item.state);
@@ -273,7 +362,11 @@ function monitorControls() {
         ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
       const timings = latest?.timings_ms;
       const awaitingConfirmation = visual?.state === "awaiting_confirmation";
+      const livePreview = visual?.camera_id
+        ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
+        : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
       return `<div class="monitor-kicker">Visual Monitor · Attempt ${attempt.attempt_no}</div>
+        ${livePreview}
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
         <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端每 7 秒上传一个完整 7 秒窗口，并触发一次百炼判断。")}</div>
@@ -362,6 +455,7 @@ function renderExecution() {
       <div class="event-list">${renderEvents()}</div>
     </details>`;
   updateCountdown();
+  syncLivePreview();
 }
 
 function updateCountdown() {

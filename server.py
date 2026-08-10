@@ -17,10 +17,12 @@ import asyncio
 import hmac
 import json
 import os
+import re
+import time
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +34,7 @@ from execution import (
     ExecutionManager,
     ExecutionNotFoundError,
 )
+from live_preview import LivePreviewHub
 from primitives import load_atomic_catalog, load_expert_catalog
 from providers import PROVIDERS
 from realtime_monitor import VisualMonitorService, utc_iso
@@ -44,6 +47,7 @@ async def _update_visual_execution(**kwargs):
 
 visual_monitor = VisualMonitorService(_update_visual_execution)
 visual_baselines: dict[tuple[str, str, str], Path] = {}
+live_preview_hub = LivePreviewHub()
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -143,6 +147,27 @@ def _require_agent(authorization: str | None) -> None:
 
 def _require_visual_monitor(authorization: str | None) -> None:
     _require_token("VISUAL_MONITOR_TOKEN", authorization, "Bearer ")
+
+
+async def _authenticate_websocket(websocket: WebSocket, config_name: str) -> bool:
+    """Authenticate after upgrade so browser tokens never appear in URLs or logs."""
+    await websocket.accept()
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        supplied = str(json.loads(raw).get("token") or "")
+    except (asyncio.TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
+        await websocket.close(code=4401, reason="认证失败")
+        return False
+    expected = os.getenv(config_name, "")
+    if expected and not hmac.compare_digest(supplied, expected):
+        await websocket.close(code=4401, reason="认证失败")
+        return False
+    await websocket.send_json({"type": "ready"})
+    return True
+
+
+def _valid_camera_id(camera_id: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", camera_id))
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -378,6 +403,49 @@ async def claim_visual_monitor(
 ) -> dict:
     _require_visual_monitor(authorization)
     return {"assignment": await execution_manager.claim_visual_monitor(req.camera_id)}
+
+
+@app.websocket("/api/visual-monitor/live/ingest/{camera_id}")
+async def ingest_live_preview(websocket: WebSocket, camera_id: str) -> None:
+    if not _valid_camera_id(camera_id):
+        await websocket.close(code=4400, reason="camera_id 非法")
+        return
+    if not await _authenticate_websocket(websocket, "VISUAL_MONITOR_TOKEN"):
+        return
+    last_accepted = 0.0
+    try:
+        while True:
+            packet = await websocket.receive_bytes()
+            now = time.monotonic()
+            if now - last_accepted < 0.18:  # hard ceiling just above the supported 5 FPS
+                continue
+            try:
+                await live_preview_hub.publish(camera_id, packet)
+            except ValueError as exc:
+                await websocket.send_json({"type": "frame_rejected", "reason": str(exc)})
+                continue
+            last_accepted = now
+    except WebSocketDisconnect:
+        return
+
+
+@app.websocket("/api/visual-monitor/live/view/{camera_id}")
+async def view_live_preview(websocket: WebSocket, camera_id: str) -> None:
+    if not _valid_camera_id(camera_id):
+        await websocket.close(code=4400, reason="camera_id 非法")
+        return
+    if not await _authenticate_websocket(websocket, "OPERATOR_TOKEN"):
+        return
+    queue, latest = await live_preview_hub.subscribe(camera_id)
+    try:
+        if latest is not None:
+            await websocket.send_bytes(latest)
+        while True:
+            await websocket.send_bytes(await queue.get())
+    except WebSocketDisconnect:
+        return
+    finally:
+        await live_preview_hub.unsubscribe(camera_id, queue)
 
 
 @app.post("/api/executions/{execution_id}/visual-monitor/resume")

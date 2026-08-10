@@ -8,9 +8,12 @@ import concurrent.futures
 import io
 import json
 import os
+import ssl
+import struct
 import tempfile
 import threading
 import time
+from urllib.parse import quote, urlsplit
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +88,108 @@ def assignment_identity(assignment: dict[str, Any] | None) -> tuple[str, str, in
 
 def uploads_paused(assignment: dict[str, Any] | None) -> bool:
     return bool(assignment and assignment.get("monitor_state") == "awaiting_confirmation")
+
+
+class LivePreviewSender:
+    """Encode and upload only the newest preview frame on an isolated thread."""
+
+    _header = struct.Struct("!dI")
+
+    def __init__(self, args: argparse.Namespace, token: str, camera_id: str, image_module: Any) -> None:
+        self.args = args
+        self.token = token
+        self.camera_id = camera_id
+        self.Image = image_module
+        self._stop = threading.Event()
+        self._condition = threading.Condition()
+        self._latest: tuple[int, float, Any] | None = None
+        self._sequence = 0
+        self._thread = threading.Thread(target=self._run, name="live-preview", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def offer(self, frame: Any, captured_at: float) -> None:
+        with self._condition:
+            self._sequence = (self._sequence + 1) & 0xFFFFFFFF
+            self._latest = (self._sequence, captured_at, frame)
+            self._condition.notify()
+
+    def stop(self) -> None:
+        self._stop.set()
+        with self._condition:
+            self._condition.notify_all()
+        self._thread.join(timeout=max(3.0, self.args.http_timeout + 1.0))
+
+    def _websocket_url(self) -> str:
+        parsed = urlsplit(self.args.server.rstrip("/"))
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        return f"{scheme}://{parsed.netloc}/api/visual-monitor/live/ingest/{quote(self.camera_id, safe='')}"
+
+    def _encode_packet(self, sequence: int, captured_at: float, frame: Any) -> bytes:
+        image = self.Image.fromarray(frame)
+        if image.size != (self.args.preview_width, self.args.preview_height):
+            image = image.resize(
+                (self.args.preview_width, self.args.preview_height),
+                self.Image.Resampling.BILINEAR,
+            )
+        payload = io.BytesIO()
+        image.save(payload, format="JPEG", quality=self.args.preview_quality, optimize=False)
+        jpeg = payload.getvalue()
+        if len(jpeg) > 200 * 1024:
+            raise RuntimeError(f"实时预览帧超过 200 KB: {len(jpeg)}")
+        return self._header.pack(captured_at, sequence) + jpeg
+
+    def _run(self) -> None:
+        try:
+            from websockets.sync.client import connect
+        except ImportError:
+            print(json.dumps({"event": "preview.disabled", "error": "缺少 websockets 依赖"}, ensure_ascii=False))
+            return
+        ssl_context = None
+        if self.args.insecure and self._websocket_url().startswith("wss://"):
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+        last_sent = -1
+        while not self._stop.is_set():
+            try:
+                kwargs: dict[str, Any] = {
+                    "open_timeout": self.args.http_timeout,
+                    "close_timeout": 2,
+                    "max_size": 256 * 1024,
+                    "compression": None,
+                }
+                if ssl_context is not None:
+                    kwargs["ssl"] = ssl_context
+                # websockets 15 supports explicit proxy bypass; older versions connect
+                # directly and don't expose this argument.
+                if self.args.no_proxy:
+                    import inspect
+                    if "proxy" in inspect.signature(connect).parameters:
+                        kwargs["proxy"] = None
+                with connect(self._websocket_url(), **kwargs) as websocket:
+                    websocket.send(json.dumps({"token": self.token}))
+                    ready = json.loads(websocket.recv(timeout=5))
+                    if ready.get("type") != "ready":
+                        raise RuntimeError("实时预览服务认证失败")
+                    print(json.dumps({"event": "preview.connected", "camera_id": self.camera_id}, ensure_ascii=False))
+                    while not self._stop.is_set():
+                        with self._condition:
+                            while (
+                                not self._stop.is_set()
+                                and (self._latest is None or self._latest[0] == last_sent)
+                            ):
+                                self._condition.wait(timeout=1.0)
+                            if self._stop.is_set():
+                                break
+                            sequence, captured_at, frame = self._latest
+                        websocket.send(self._encode_packet(sequence, captured_at, frame))
+                        last_sent = sequence
+            except Exception as exc:
+                if not self._stop.is_set():
+                    print(json.dumps({"event": "preview.reconnecting", "error": str(exc)}, ensure_ascii=False))
+                    self._stop.wait(1.0)
 
 
 class AssignmentPoller:
@@ -276,6 +381,9 @@ class RealSenseMonitorClient:
         pending: set[concurrent.futures.Future] = set()
         poller = AssignmentPoller(self.args, self.token, camera_id)
         poller.start()
+        preview = LivePreviewSender(self.args, self.token, camera_id, self.Image)
+        preview.start()
+        next_preview = 0.0
         print(json.dumps({"event": "camera.ready", "camera_id": camera_id}, ensure_ascii=False))
         try:
             while True:
@@ -284,6 +392,9 @@ class RealSenseMonitorClient:
                     continue
                 now = time.time()
                 frame = self.np.asanyarray(color.get_data()).copy()
+                if now >= next_preview:
+                    preview.offer(frame, now)
+                    next_preview = now + 1.0 / self.args.preview_fps
                 polled_generation, polled_assignment = poller.snapshot()
                 if polled_generation != generation:
                     generation = polled_generation
@@ -350,6 +461,7 @@ class RealSenseMonitorClient:
         except KeyboardInterrupt:
             print(json.dumps({"event": "client.stopped"}, ensure_ascii=False))
         finally:
+            preview.stop()
             poller.stop()
             pipeline.stop()
             workers.shutdown(wait=True, cancel_futures=True)
@@ -366,6 +478,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cycle-seconds", type=float, default=7.0)
     result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
+    result.add_argument("--preview-fps", type=float, default=3.0)
+    result.add_argument("--preview-width", type=int, default=640)
+    result.add_argument("--preview-height", type=int, default=480)
+    result.add_argument("--preview-quality", type=int, default=65)
     result.add_argument("--http-timeout", type=float, default=30.0)
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")
     result.add_argument("--insecure", action="store_true", help="仅用于自签名证书测试")
@@ -374,7 +490,13 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
-    if args.window_seconds <= 0 or args.cycle_seconds <= 0 or args.assignment_poll_seconds <= 0 or args.video_fps <= 0:
+    if (
+        args.window_seconds <= 0 or args.cycle_seconds <= 0
+        or args.assignment_poll_seconds <= 0 or args.video_fps <= 0
+        or not 0 < args.preview_fps <= 5
+        or args.preview_width <= 0 or args.preview_height <= 0
+        or not 1 <= args.preview_quality <= 95
+    ):
         raise SystemExit("窗口、周期和视频 FPS 必须大于 0")
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     client = RealSenseMonitorClient(args)

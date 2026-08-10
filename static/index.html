@@ -351,6 +351,13 @@
   .visual-status.failed { color:var(--red); background:var(--red-soft); }
   .visual-status.unknown { color:var(--muted); background:#eef0f5; }
   .visual-failure { margin:10px 0; padding:9px; border-radius:8px; color:var(--red); background:var(--red-soft); font-size:11.5px; line-height:1.5; }
+  .live-preview { width:100%; margin:12px 0 2px; overflow:hidden; border-radius:10px; background:#10131a; }
+  .live-preview img { display:block; width:100%; aspect-ratio:4/3; object-fit:contain; background:#090b10; }
+  .live-preview.waiting { display:grid; min-height:150px; place-items:center; color:#aeb4c2; font-size:12px; }
+  .live-preview-meta { display:flex; justify-content:space-between; gap:8px; padding:7px 9px; color:#b7bdca; font-size:9.5px; background:#171b24; }
+  .live-preview-status.live { color:#65d6a3; }
+  .live-preview-status.bad { color:#ff8795; }
+  .live-preview-status.wait { color:#f1c46d; }
   .monitor-evidence { width:100%; max-height:230px; object-fit:contain; margin-top:12px; border-radius:9px; background:#111; }
   .timing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin-top:10px; color:var(--muted); font-size:9.5px; }
   .timing-grid span { padding:5px 3px; border-radius:6px; background:#f4f5f9; }
