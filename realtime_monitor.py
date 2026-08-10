@@ -204,7 +204,16 @@ class VisualMonitorService:
             log_path = job["video_path"].with_suffix(".json")
             log_path.write_text(json.dumps({"latest": latest, "raw": raw}, ensure_ascii=False, indent=2), encoding="utf-8")
             try:
-                await self.update_callback(**common, patch={"state": "observing", "latest": latest}, event_type="visual_monitor.observation")
+                next_state = (
+                    "awaiting_confirmation"
+                    if result["status"] in {"succeeded", "failed"}
+                    else "observing"
+                )
+                await self.update_callback(
+                    **common,
+                    patch={"state": next_state, "latest": latest, "active_sequence": None},
+                    event_type="visual_monitor.observation",
+                )
             except ExecutionConflictError:
                 # The operator may have confirmed the step while inference was in flight.
                 # The execution manager rejects that stale attempt; never let it overwrite
@@ -214,7 +223,7 @@ class VisualMonitorService:
             try:
                 await self.update_callback(
                     **common,
-                    patch={"state": "error", "latest": {"status": "unknown", "description_zh": "视觉模型请求失败", "failure_reason": None, "error": str(exc), "sequence": job["sequence"], "observed_at": utc_iso()}},
+                    patch={"state": "error", "active_sequence": None, "latest": {"status": "unknown", "description_zh": "视觉模型请求失败", "failure_reason": None, "error": str(exc), "sequence": job["sequence"], "observed_at": utc_iso()}},
                     event_type="visual_monitor.error",
                 )
             except ExecutionConflictError:

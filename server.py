@@ -70,6 +70,10 @@ class VisualClaimRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=128)
 
 
+class VisualResumeRequest(BaseModel):
+    attempt_id: str = Field(min_length=1, max_length=128)
+
+
 class MonitorReportRequest(BaseModel):
     report_id: str = Field(min_length=1, max_length=128)
     step_id: str = Field(min_length=1, max_length=128)
@@ -376,6 +380,21 @@ async def claim_visual_monitor(
     return {"assignment": await execution_manager.claim_visual_monitor(req.camera_id)}
 
 
+@app.post("/api/executions/{execution_id}/visual-monitor/resume")
+async def resume_visual_monitor(
+    execution_id: str,
+    req: VisualResumeRequest,
+    x_operator_token: str | None = Header(default=None),
+) -> dict:
+    _require_operator(x_operator_token)
+    try:
+        return {"execution": await execution_manager.resume_visual_monitor(
+            execution_id, attempt_id=req.attempt_id,
+        )}
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
 @app.post("/api/visual-monitor/baseline")
 async def upload_visual_baseline(
     execution_id: str = Form(...),
@@ -425,27 +444,49 @@ async def upload_visual_checkpoint(
     assignment = await execution_manager.claim_visual_monitor(camera_id)
     if not assignment or assignment["execution_id"] != execution_id or assignment["attempt_id"] != attempt_id:
         raise HTTPException(status_code=409, detail="Visual Monitor assignment 已过期")
+    if assignment.get("monitor_state") == "awaiting_confirmation":
+        raise HTTPException(status_code=409, detail="Visual Monitor 正在等待人工确认")
+    if assignment.get("monitor_state") == "inferencing":
+        raise HTTPException(status_code=409, detail="Visual Monitor 当前已有推理请求")
     baseline = visual_baselines.get((execution_id, attempt_id, camera_id))
     if not baseline or not baseline.is_file():
         raise HTTPException(status_code=409, detail="请先上传 BEFORE baseline")
     try:
         path, size, write_ms = await visual_monitor.save_upload(video, ".mp4")
         visual_monitor.cleanup_expired()
-        await visual_monitor.submit(
-            assignment=assignment,
+        await execution_manager.begin_visual_checkpoint(
+            execution_id,
+            attempt_id=attempt_id,
             camera_id=camera_id,
             sequence=sequence,
-            baseline_path=baseline,
-            video_path=path,
-            client_timings={
-                "capture": capture_ms,
-                "encode": encode_ms,
-                "server_write": round(write_ms, 1),
-            },
         )
+        try:
+            await visual_monitor.submit(
+                assignment=assignment,
+                camera_id=camera_id,
+                sequence=sequence,
+                baseline_path=baseline,
+                video_path=path,
+                client_timings={
+                    "capture": capture_ms,
+                    "encode": encode_ms,
+                    "server_write": round(write_ms, 1),
+                },
+            )
+        except RuntimeError as exc:
+            await execution_manager.update_visual_monitor(
+                execution_id,
+                attempt_id=attempt_id,
+                camera_id=camera_id,
+                patch={"state": "error", "active_sequence": None},
+                event_type="visual_monitor.error",
+            )
+            raise exc
         return {"accepted": True, "sequence": sequence, "bytes": size, "server_write_ms": round(write_ms, 1), "in_flight": visual_monitor.in_flight, "received_at": utc_iso()}
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 

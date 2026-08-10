@@ -254,6 +254,7 @@ class ExecutionManager:
                     attempt["visual_monitor"] = {
                         "camera_id": camera_id,
                         "state": "awaiting_baseline",
+                        "monitor_epoch": 1,
                         "latest": None,
                         "baseline_url": None,
                         "claimed_at": _iso(),
@@ -274,9 +275,92 @@ class ExecutionManager:
                     "zh": step.get("zh"),
                     "slots": copy.deepcopy(step.get("slots", {})),
                     "previous_status": ((attempt.get("visual_monitor") or {}).get("latest") or {}).get("status"),
+                    "monitor_state": (attempt.get("visual_monitor") or {}).get("state"),
+                    "monitor_epoch": (attempt.get("visual_monitor") or {}).get("monitor_epoch", 1),
                     **contract_meta,
                 }
         return None
+
+    async def begin_visual_checkpoint(
+        self,
+        execution_id: str,
+        *,
+        attempt_id: str,
+        camera_id: str,
+        sequence: int,
+    ) -> dict[str, Any]:
+        """Atomically reserve the one allowed inference slot for an attempt."""
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            attempt = execution.get("active_attempt")
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "visual_monitor"
+                or not attempt
+                or attempt["attempt_id"] != attempt_id
+                or attempt["status"] != "waiting"
+            ):
+                raise ExecutionConflictError("Visual Monitor attempt 已过期")
+            monitor = attempt.get("visual_monitor")
+            if not monitor or monitor.get("camera_id") != camera_id:
+                raise ExecutionConflictError("Visual Monitor camera claim 不匹配")
+            state = monitor.get("state")
+            if state == "awaiting_confirmation":
+                raise ExecutionConflictError("Visual Monitor 正在等待人工确认")
+            if state == "inferencing":
+                raise ExecutionConflictError("Visual Monitor 当前已有推理请求")
+            if state == "awaiting_baseline":
+                raise ExecutionConflictError("请先上传 BEFORE baseline")
+            monitor["state"] = "inferencing"
+            monitor["active_sequence"] = sequence
+            self._record_event_locked(execution, "visual_monitor.inference.started", {
+                "step_id": self._current_step_locked(execution)["step_id"],
+                "attempt_id": attempt_id,
+                "camera_id": camera_id,
+                "sequence": sequence,
+            })
+            return self._snapshot_locked(execution)
+
+    async def resume_visual_monitor(
+        self,
+        execution_id: str,
+        *,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Discard a terminal VLM observation and start a fresh observation epoch."""
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            attempt = execution.get("active_attempt")
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "visual_monitor"
+                or not attempt
+                or attempt["attempt_id"] != attempt_id
+                or attempt["status"] != "waiting"
+            ):
+                raise ExecutionConflictError("Visual Monitor attempt 已过期")
+            monitor = attempt.get("visual_monitor")
+            if not monitor or monitor.get("state") != "awaiting_confirmation":
+                raise ExecutionConflictError("当前没有等待确认的视觉终态")
+            monitor.update({
+                "state": "awaiting_baseline",
+                "monitor_epoch": int(monitor.get("monitor_epoch", 1)) + 1,
+                "latest": None,
+                "baseline_url": None,
+                "baseline_captured_at": None,
+                "active_sequence": None,
+            })
+            self._record_event_locked(execution, "visual_monitor.resumed", {
+                "step_id": self._current_step_locked(execution)["step_id"],
+                "attempt_id": attempt_id,
+                "monitor_epoch": monitor["monitor_epoch"],
+            })
+            self._schedule_timeout_locked(
+                execution_id,
+                attempt_id,
+                timeout_seconds=float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120")),
+            )
+            return self._snapshot_locked(execution)
 
     async def update_visual_monitor(
         self,
@@ -301,7 +385,13 @@ class ExecutionManager:
             monitor = attempt.get("visual_monitor")
             if not monitor or monitor.get("camera_id") != camera_id:
                 raise ExecutionConflictError("Visual Monitor camera claim 不匹配")
+            if event_type == "visual_monitor.baseline.ready" and monitor.get("state") != "awaiting_baseline":
+                raise ExecutionConflictError("当前不接受新的 BEFORE baseline")
+            if event_type in {"visual_monitor.observation", "visual_monitor.error"} and monitor.get("state") != "inferencing":
+                raise ExecutionConflictError("Visual Monitor 推理结果已过期")
             monitor.update(copy.deepcopy(patch))
+            if monitor.get("state") == "awaiting_confirmation":
+                self._cancel_timer_locked(execution_id)
             self._record_event_locked(execution, event_type, {
                 "step_id": self._current_step_locked(execution)["step_id"],
                 "attempt_id": attempt_id,
@@ -333,6 +423,21 @@ class ExecutionManager:
                         workflow["run_id"],
                     )
                     continue
+                if execution.get("execution_mode") == "visual_monitor":
+                    monitor = attempt.get("visual_monitor") or {}
+                    if monitor.get("state") == "awaiting_confirmation":
+                        # Human confirmation intentionally has no automatic timeout.
+                        continue
+                    if monitor.get("state") == "inferencing":
+                        # The request task was process-local and cannot survive restart.
+                        monitor.update({"state": "error", "active_sequence": None})
+                        self._record_event_locked(execution, "visual_monitor.error", {
+                            "step_id": self._current_step_locked(execution)["step_id"],
+                            "attempt_id": attempt["attempt_id"],
+                            "camera_id": monitor.get("camera_id"),
+                            "status": None,
+                            "detail": "server restarted during inference",
+                        })
                 step = self._current_step_locked(execution)
                 timeout_seconds = (
                     float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120"))

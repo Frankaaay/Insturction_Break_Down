@@ -99,15 +99,112 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("workflow_preview", started["active_attempt"])
         assignment = await self.manager.claim_visual_monitor("camera-1")
         self.assertEqual(assignment["attempt_id"], started["active_attempt"]["attempt_id"])
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
         snapshot = await self.manager.update_visual_monitor(
             execution["execution_id"],
             attempt_id=assignment["attempt_id"],
             camera_id="camera-1",
-            patch={"state": "observing", "latest": {"status": "succeeded"}},
+            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
             event_type="visual_monitor.observation",
         )
         self.assertEqual(snapshot["state"], "running")
         self.assertEqual(snapshot["steps"][0]["status"], "active")
+        self.assertEqual(snapshot["active_attempt"]["visual_monitor"]["state"], "awaiting_confirmation")
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.begin_visual_checkpoint(
+                execution["execution_id"], attempt_id=assignment["attempt_id"],
+                camera_id="camera-1", sequence=2,
+            )
+        resumed = await self.manager.resume_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+        )
+        monitor = resumed["active_attempt"]["visual_monitor"]
+        self.assertEqual(monitor["state"], "awaiting_baseline")
+        self.assertEqual(monitor["monitor_epoch"], 2)
+        self.assertIsNone(monitor["latest"])
+        reclaimed = await self.manager.claim_visual_monitor("camera-1")
+        self.assertEqual(reclaimed["monitor_epoch"], 2)
+
+    async def test_only_one_visual_inference_can_be_reserved(self):
+        execution = await self.manager.create(
+            "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.begin_visual_checkpoint(
+                execution["execution_id"], attempt_id=assignment["attempt_id"],
+                camera_id="camera-1", sequence=2,
+            )
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "observing", "latest": {"status": "in_progress"}},
+            event_type="visual_monitor.observation",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=3,
+        )
+
+    async def test_restart_recovery_does_not_restart_confirmation_timeout(self):
+        execution = await self.manager.create(
+            "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1",
+            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
+            event_type="visual_monitor.observation",
+        )
+        await self.manager.resume_timers()
+        self.assertNotIn(execution["execution_id"], self.manager._timers)
+
+    async def test_restart_recovery_releases_orphaned_inference(self):
+        execution = await self.manager.create(
+            "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
+        await self.manager.resume_timers()
+        snapshot = await self.manager.get(execution["execution_id"])
+        self.assertEqual(snapshot["active_attempt"]["visual_monitor"]["state"], "error")
 
     async def test_visual_monitor_claims_full_pick_carry_place_chain(self):
         execution = await self.manager.create(

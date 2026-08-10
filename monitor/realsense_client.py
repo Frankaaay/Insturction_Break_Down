@@ -73,10 +73,18 @@ def sample_window(buffer: deque, start: float, end: float, fps: int = 6) -> list
     return result
 
 
-def assignment_identity(assignment: dict[str, Any] | None) -> tuple[str, str] | None:
+def assignment_identity(assignment: dict[str, Any] | None) -> tuple[str, str, int] | None:
     if not assignment:
         return None
-    return str(assignment["execution_id"]), str(assignment["attempt_id"])
+    return (
+        str(assignment["execution_id"]),
+        str(assignment["attempt_id"]),
+        int(assignment.get("monitor_epoch", 1)),
+    )
+
+
+def uploads_paused(assignment: dict[str, Any] | None) -> bool:
+    return bool(assignment and assignment.get("monitor_state") == "awaiting_confirmation")
 
 
 class AssignmentPoller:
@@ -263,6 +271,7 @@ class RealSenseMonitorClient:
         baseline_sent = False
         next_checkpoint = None
         sequence = 0
+        pause_announced = False
         workers = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         pending: set[concurrent.futures.Future] = set()
         poller = AssignmentPoller(self.args, self.token, camera_id)
@@ -282,11 +291,26 @@ class RealSenseMonitorClient:
                     baseline_sent = False
                     next_checkpoint = None
                     sequence = 0
+                    pause_announced = False
                     ring.clear()
                     if assignment:
                         print(json.dumps({"event": "assignment.claimed", "generation": generation, **assignment}, ensure_ascii=False))
                     else:
                         print(json.dumps({"event": "assignment.cleared", "generation": generation}, ensure_ascii=False))
+                else:
+                    # State changes (inferencing/awaiting_confirmation) do not change
+                    # assignment identity, but must still take effect within one poll.
+                    assignment = polled_assignment
+                if uploads_paused(assignment):
+                    ring.clear()
+                    if not pause_announced:
+                        print(json.dumps({
+                            "event": "monitor.awaiting_confirmation",
+                            "generation": generation,
+                            "status": assignment.get("previous_status"),
+                        }, ensure_ascii=False))
+                        pause_announced = True
+                    continue
                 ring.append((now, frame))
                 while ring and ring[0][0] < now - self.args.window_seconds - 1:
                     ring.popleft()
@@ -312,7 +336,9 @@ class RealSenseMonitorClient:
                     sequence += 1
                     window_start = now - self.args.window_seconds
                     selected = sample_window(ring, window_start, now, self.args.video_fps)
-                    if len(pending) < 2 and selected:
+                    if assignment.get("monitor_state") == "inferencing":
+                        print(json.dumps({"event": "checkpoint.skipped", "sequence": sequence, "reason": "server inference still running"}, ensure_ascii=False))
+                    elif len(pending) < 2 and selected:
                         pending.add(workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,

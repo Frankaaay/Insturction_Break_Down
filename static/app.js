@@ -35,6 +35,8 @@ const EVENT_LABELS = {
   "visual_monitor.baseline.ready": "视觉初始帧已就绪",
   "visual_monitor.observation": "VLM 返回最新观察",
   "visual_monitor.error": "VLM 请求失败",
+  "visual_monitor.inference.started": "VLM 推理已开始",
+  "visual_monitor.resumed": "继续视觉监控",
 };
 
 function esc(value) {
@@ -270,6 +272,7 @@ function monitorControls() {
       const evidence = latest?.completion_evidence_url
         ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
       const timings = latest?.timings_ms;
+      const awaitingConfirmation = visual?.state === "awaiting_confirmation";
       return `<div class="monitor-kicker">Visual Monitor · Attempt ${attempt.attempt_no}</div>
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
@@ -280,9 +283,10 @@ function monitorControls() {
         <div class="monitor-buttons">
           <button class="control-btn success" data-action="report-success" ${commandBusy ? "disabled" : ""}>人工确认成功</button>
           <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
+          ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}
           <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
         </div>
-        <div class="monitor-note">VLM 只提供视觉观察，不自动推进或停止任务。</div>`;
+        <div class="monitor-note">${awaitingConfirmation ? "已暂停视频缓存和百炼请求，等待人工确认。" : "VLM 只提供视觉观察，不自动推进任务。"}</div>`;
     }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>
@@ -475,6 +479,11 @@ function handleControl(action) {
   if (action.startsWith("mode-")) return postControl("mode", { mode: action.slice(5) });
   if (action === "retry") return postControl("retry");
   if (action === "terminate") return postControl("terminate");
+  if (action === "resume-monitor") {
+    const attempt = execution.active_attempt;
+    if (!attempt) return;
+    return postControl("visual-monitor/resume", { attempt_id: attempt.attempt_id });
+  }
   if (action.startsWith("report-")) {
     const step = currentStep();
     const attempt = execution.active_attempt;

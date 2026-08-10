@@ -194,6 +194,113 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             server.visual_baselines = previous_baselines
             temporary.cleanup()
 
+    async def test_visual_monitor_resume_starts_new_epoch_without_advancing(self):
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            created = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子", "provider": "deepseek",
+            })).json()["execution"]
+        await self.client.post(
+            f"/api/executions/{created['execution_id']}/mode",
+            json={"mode": "visual_monitor"},
+        )
+        await self.client.post(f"/api/executions/{created['execution_id']}/start")
+        assignment = (await self.client.post(
+            "/api/visual-monitor/claim", json={"camera_id": "cam-resume"},
+        )).json()["assignment"]
+        await server.execution_manager.update_visual_monitor(
+            created["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="cam-resume", patch={"state": "ready"},
+            event_type="visual_monitor.baseline.ready",
+        )
+        await server.execution_manager.begin_visual_checkpoint(
+            created["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="cam-resume", sequence=1,
+        )
+        await server.execution_manager.update_visual_monitor(
+            created["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="cam-resume",
+            patch={"state": "awaiting_confirmation", "latest": {"status": "succeeded"}},
+            event_type="visual_monitor.observation",
+        )
+        response = await self.client.post(
+            f"/api/executions/{created['execution_id']}/visual-monitor/resume",
+            json={"attempt_id": assignment["attempt_id"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        execution = response.json()["execution"]
+        self.assertEqual(execution["current_step_index"], 0)
+        self.assertEqual(execution["active_attempt"]["attempt_id"], assignment["attempt_id"])
+        self.assertEqual(execution["active_attempt"]["visual_monitor"]["monitor_epoch"], 2)
+        self.assertEqual(execution["active_attempt"]["visual_monitor"]["state"], "awaiting_baseline")
+
+    async def test_checkpoint_api_rejects_second_request_while_inferencing(self):
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            created = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子", "provider": "deepseek",
+            })).json()["execution"]
+        await self.client.post(
+            f"/api/executions/{created['execution_id']}/mode", json={"mode": "visual_monitor"},
+        )
+        started = (await self.client.post(
+            f"/api/executions/{created['execution_id']}/start",
+        )).json()["execution"]
+        temporary = tempfile.TemporaryDirectory()
+        previous_service = server.visual_monitor
+        previous_baselines = server.visual_baselines
+        service = VisualMonitorService(
+            server._update_visual_execution,
+            VisualMonitorConfig(Path(temporary.name), max_concurrency=2),
+        )
+        release = asyncio.Event()
+
+        async def slow_call(*args):
+            await release.wait()
+            return ({
+                "status": "in_progress", "description_zh": "仍在执行",
+                "failure_reason": None,
+                "evidence": [{"timestamp_s": 1.0, "observation": "手正在接近杯子"}],
+                "completion_evidence_timestamp_s": None,
+            }, {"bailian_total": 10.0}, "qwen3.7-plus", "{}")
+
+        service._call_bailian = slow_call
+        server.visual_monitor = service
+        server.visual_baselines = {}
+        attempt_id = started["active_attempt"]["attempt_id"]
+        try:
+            await self.client.post("/api/visual-monitor/claim", json={"camera_id": "cam-one"})
+            baseline = await self.client.post("/api/visual-monitor/baseline", data={
+                "execution_id": created["execution_id"], "attempt_id": attempt_id,
+                "camera_id": "cam-one", "captured_at": "2026-08-10T00:00:00Z",
+            }, files={"image": ("before.jpg", b"jpeg", "image/jpeg")})
+            self.assertEqual(baseline.status_code, 200)
+            form = {
+                "execution_id": created["execution_id"], "attempt_id": attempt_id,
+                "camera_id": "cam-one", "window_started_at": "2026-08-10T00:00:00Z",
+                "window_ended_at": "2026-08-10T00:00:07Z", "capture_ms": "7000",
+                "encode_ms": "80",
+            }
+            first = await self.client.post(
+                "/api/visual-monitor/checkpoints", data={**form, "sequence": "1"},
+                files={"video": ("one.mp4", b"mp4", "video/mp4")},
+            )
+            second = await self.client.post(
+                "/api/visual-monitor/checkpoints", data={**form, "sequence": "2"},
+                files={"video": ("two.mp4", b"mp4", "video/mp4")},
+            )
+            self.assertEqual(first.status_code, 202)
+            self.assertEqual(second.status_code, 409)
+            self.assertIn("已有推理请求", second.json()["detail"])
+        finally:
+            release.set()
+            for _ in range(50):
+                if not service.in_flight:
+                    break
+                await asyncio.sleep(0.01)
+            await service.close()
+            server.visual_monitor = previous_service
+            server.visual_baselines = previous_baselines
+            temporary.cleanup()
+
     async def test_stale_report_returns_409_and_missing_session_returns_404(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):
             execution = (await self.client.post("/api/executions", json={
