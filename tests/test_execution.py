@@ -132,6 +132,59 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
             "description_zh": "尚未放稳",
         }])
 
+    async def test_chain_visual_monitor_accumulates_success_across_three_windows(self):
+        execution = await self.manager.create(
+            "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
+            execution_mode="chain_visual_monitor",
+        )
+        started = await self.manager.start(execution["execution_id"])
+        step_ids = [step["step_id"] for step in started["steps"]]
+        assignment = await self.manager.claim_visual_monitor("camera-1", "qwen3.7-plus")
+        session_id = assignment["attempt_id"]
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=session_id, camera_id="camera-1",
+            patch={"state": "ready"}, event_type="visual_monitor.baseline.ready",
+        )
+
+        windows = [
+            [
+                {"step_id": step_ids[0], "status": "succeeded", "description_zh": "水壶已离开桌面"},
+                {"step_id": step_ids[1], "status": "in_progress", "description_zh": "正在搬运"},
+            ],
+            [
+                {"step_id": step_ids[1], "status": "succeeded", "description_zh": "已搬到目标桌面附近"},
+                {"step_id": step_ids[2], "status": "in_progress", "description_zh": "尚未释放"},
+            ],
+            [
+                {"step_id": step_ids[2], "status": "succeeded", "description_zh": "释放后稳定留在桌面"},
+            ],
+        ]
+        expected_indices = [1, 2, 2]
+        for sequence, (updates, expected_index) in enumerate(zip(windows, expected_indices), start=1):
+            await self.manager.begin_visual_checkpoint(
+                execution["execution_id"], attempt_id=session_id,
+                camera_id="camera-1", sequence=sequence,
+            )
+            terminal = sequence == len(windows)
+            snapshot = await self.manager.apply_chain_visual_result(
+                execution["execution_id"], attempt_id=session_id, camera_id="camera-1",
+                latest={
+                    "status": "succeeded" if terminal else "in_progress",
+                    "description_zh": updates[-1]["description_zh"],
+                    "step_updates": updates,
+                    "sequence": sequence,
+                },
+            )
+            self.assertEqual(snapshot["current_step_index"], expected_index)
+            if not terminal:
+                reclaimed = await self.manager.claim_visual_monitor("camera-1", "qwen3.7-plus")
+                self.assertEqual(reclaimed["attempt_id"], session_id)
+                self.assertEqual(reclaimed["current_step_index"], expected_index)
+
+        self.assertEqual(snapshot["state"], "completed")
+        self.assertEqual([step["status"] for step in snapshot["steps"]], ["succeeded"] * 3)
+        self.assertEqual(snapshot["chain_visual_monitor"]["state"], "succeeded")
+
     async def test_chain_visual_monitor_failure_stays_on_first_wrong_step(self):
         execution = await self.manager.create(
             "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
@@ -148,8 +201,6 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         updates = [
             {"step_id": started["steps"][0]["step_id"], "status": "failed", "description_zh": "拿起了手机", "failure_reason": "拿错物体"},
-            {"step_id": started["steps"][1]["step_id"], "status": "unknown", "description_zh": "前序失败"},
-            {"step_id": started["steps"][2]["step_id"], "status": "unknown", "description_zh": "前序失败"},
         ]
         snapshot = await self.manager.apply_chain_visual_result(
             execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
@@ -158,6 +209,29 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["current_step_index"], 0)
         self.assertEqual(snapshot["steps"][0]["status"], "active")
         self.assertEqual(snapshot["chain_visual_monitor"]["state"], "awaiting_confirmation")
+
+    async def test_chain_pipeline_telemetry_is_visible_and_rejects_stale_sequence(self):
+        execution = await self.manager.create(
+            "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
+            execution_mode="chain_visual_monitor",
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        snapshot = await self.manager.update_visual_pipeline(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+            pipeline={
+                "phase": "capturing", "sequence": 1,
+                "phase_started_at": "2026-08-11T00:00:00Z",
+                "window_started_at": "2026-08-11T00:00:00Z",
+                "window_ended_at": "2026-08-11T00:00:06Z",
+            },
+        )
+        self.assertEqual(snapshot["chain_visual_monitor"]["pipeline"]["phase"], "capturing")
+        with self.assertRaises(ExecutionConflictError):
+            await self.manager.update_visual_pipeline(
+                execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+                pipeline={"phase": "uploading", "sequence": 0, "phase_started_at": "2026-08-11T00:00:07Z"},
+            )
 
     async def test_visual_failure_observation_waits_for_confirmation(self):
         execution = await self.manager.create(

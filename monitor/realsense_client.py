@@ -343,6 +343,32 @@ class RealSenseMonitorClient:
         )
         response.raise_for_status()
 
+    def report_phase(
+        self, assignment: dict[str, Any], camera_id: str, sequence: int,
+        phase: str, phase_started_at: float, *,
+        window_started_at: float | None = None,
+        window_ended_at: float | None = None,
+    ) -> None:
+        payload = {
+            "execution_id": assignment["execution_id"],
+            "attempt_id": assignment["attempt_id"],
+            "camera_id": camera_id,
+            "sequence": sequence,
+            "phase": phase,
+            "phase_started_at": utc_iso(phase_started_at),
+            "window_started_at": utc_iso(window_started_at) if window_started_at is not None else None,
+            "window_ended_at": utc_iso(window_ended_at) if window_ended_at is not None else None,
+        }
+        try:
+            response = self.http.post("/api/visual-monitor/telemetry", json=payload)
+            if response.status_code not in {200, 409}:
+                response.raise_for_status()
+        except Exception as exc:
+            print(json.dumps({
+                "event": "pipeline.telemetry_error", "phase": phase,
+                "sequence": sequence, "error": str(exc),
+            }, ensure_ascii=False))
+
     def upload_checkpoint(
         self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
         frames: list[Any], now_frame: Any, window_start: float, window_end: float,
@@ -350,6 +376,11 @@ class RealSenseMonitorClient:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
         try:
+            encode_started_wall = time.time()
+            self.report_phase(
+                assignment, camera_id, sequence, "encoding", encode_started_wall,
+                window_started_at=window_start, window_ended_at=window_end,
+            )
             encode_started = time.perf_counter()
             encode_mp4(frames, video_path, self.args.video_fps)
             now_payload = io.BytesIO()
@@ -357,6 +388,11 @@ class RealSenseMonitorClient:
                 now_payload, format="JPEG", quality=82, optimize=True,
             )
             encode_ms = (time.perf_counter() - encode_started) * 1000
+            upload_started_wall = time.time()
+            self.report_phase(
+                assignment, camera_id, sequence, "uploading", upload_started_wall,
+                window_started_at=window_start, window_ended_at=window_end,
+            )
             upload_started = time.perf_counter()
             with video_path.open("rb") as handle:
                 response = self.http.post(
@@ -366,6 +402,7 @@ class RealSenseMonitorClient:
                         "camera_id": camera_id, "sequence": sequence,
                         "window_started_at": utc_iso(window_start), "window_ended_at": utc_iso(window_end),
                         "capture_ms": (window_end - window_start) * 1000, "encode_ms": encode_ms,
+                        "upload_started_at": utc_iso(upload_started_wall),
                     },
                     files={
                         "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
@@ -457,6 +494,11 @@ class RealSenseMonitorClient:
                     self.upload_baseline(assignment, camera_id, frame, now)
                     baseline_sent = True
                     next_checkpoint = now + self.args.window_seconds
+                    self.report_phase(
+                        assignment, camera_id, 1, "capturing", now,
+                        window_started_at=now,
+                        window_ended_at=next_checkpoint,
+                    )
                     print(json.dumps({"event": "baseline.uploaded", "captured_at": utc_iso(now)}, ensure_ascii=False))
                 if now >= next_checkpoint:
                     blocked = checkpoint_block_reason(assignment, len(pending))

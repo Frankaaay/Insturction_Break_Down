@@ -51,6 +51,8 @@ const EVENT_LABELS = {
   "chain_visual_monitor.inference.started": "整链 VLM 推理已开始",
   "chain_visual_monitor.resumed": "继续整链视觉监控",
   "chain_visual_monitor.merged": "整链步骤状态已合并",
+  "visual_monitor.pipeline": "视觉流水线阶段更新",
+  "chain_visual_monitor.pipeline": "整链视觉流水线阶段更新",
 };
 
 function esc(value) {
@@ -335,6 +337,64 @@ function currentStep() {
   return index == null ? null : execution.steps[index];
 }
 
+function currentVisualMonitor() {
+  if (execution?.execution_mode === "chain_visual_monitor") {
+    return execution.chain_visual_monitor || null;
+  }
+  return execution?.active_attempt?.visual_monitor || null;
+}
+
+function pipelineMarkup(visual, latest) {
+  if (!visual) return "";
+  const pipeline = visual.pipeline || {};
+  const timings = pipeline.timings_ms || latest?.timings_ms || {};
+  return `<div class="pipeline-panel" data-phase="${esc(pipeline.phase || "waiting")}">
+    <div class="pipeline-head"><span id="pipelinePhase">等待采集端</span><strong id="pipelineElapsed">--</strong></div>
+    <div class="pipeline-progress"><i id="pipelineProgress"></i></div>
+    <div class="pipeline-stages">
+      <span id="pipelineCapture">采集 --</span>
+      <span id="pipelineEncode">编码 ${timings.encode != null ? `${esc(Math.round(timings.encode))} ms` : "--"}</span>
+      <span id="pipelineUpload">上传 ${timings.upload_to_server != null ? `${esc(Math.round(timings.upload_to_server))} ms` : "--"}</span>
+      <span id="pipelineApi">百炼 ${timings.bailian_total != null ? `${esc((timings.bailian_total / 1000).toFixed(1))} s` : "--"}</span>
+    </div>
+  </div>`;
+}
+
+function updatePipelineClock() {
+  const pipeline = currentVisualMonitor()?.pipeline;
+  const panel = document.querySelector(".pipeline-panel");
+  if (!pipeline || !panel) return;
+  const phaseLabels = {
+    capturing: "正在采集 6 秒窗口", encoding: "正在编码视频", uploading: "正在上传服务器",
+    inferencing: "百炼正在判断", completed: "本轮判断完成", error: "本轮判断失败",
+  };
+  const started = Date.parse(pipeline.phase_started_at || "");
+  const elapsedMs = Number.isFinite(started) ? Math.max(0, Date.now() - started) : 0;
+  const shownMs = ["completed", "error"].includes(pipeline.phase)
+    ? Number(pipeline.timings_ms?.server_job_total ?? elapsedMs) : elapsedMs;
+  panel.dataset.phase = pipeline.phase || "waiting";
+  if ($("#pipelinePhase")) $("#pipelinePhase").textContent = phaseLabels[pipeline.phase] || "等待采集端";
+  if ($("#pipelineElapsed")) $("#pipelineElapsed").textContent = `${(shownMs / 1000).toFixed(1)} s`;
+  const windowStart = Date.parse(pipeline.window_started_at || "");
+  const windowEnd = Date.parse(pipeline.window_ended_at || "");
+  const windowDuration = Number.isFinite(windowStart) && Number.isFinite(windowEnd)
+    ? Math.max(1, windowEnd - windowStart) : 6000;
+  const capturedMs = pipeline.phase === "capturing"
+    ? Math.min(windowDuration, Math.max(0, Date.now() - windowStart))
+    : Number(pipeline.capture_ms ?? windowDuration);
+  if ($("#pipelineCapture")) {
+    $("#pipelineCapture").textContent = `采集 ${(Math.min(windowDuration, capturedMs) / 1000).toFixed(1)} / ${(windowDuration / 1000).toFixed(1)} s`;
+  }
+  const progress = pipeline.phase === "capturing"
+    ? Math.min(100, capturedMs / windowDuration * 100)
+    : pipeline.phase === "encoding" ? 25
+      : pipeline.phase === "uploading" ? 50
+        : pipeline.phase === "inferencing" ? 75 : 100;
+  if ($("#pipelineProgress")) $("#pipelineProgress").style.width = `${progress}%`;
+}
+
+setInterval(updatePipelineClock, 100);
+
 function monitorControls() {
   if (execution.state === "ready") {
     const mode = execution.execution_mode || "robot_agent";
@@ -384,7 +444,7 @@ function monitorControls() {
       }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
       const evidence = latest?.completion_evidence_url
         ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
-      const timings = latest?.timings_ms;
+      const timings = chainLatest?.timings_ms || latest?.timings_ms;
       const awaitingConfirmation = visual?.state === "awaiting_confirmation";
       const requestedModel = visual?.model_requested || latest?.model_requested || chainLatest?.model_requested;
       const actualModel = chainLatest?.model_actual || latest?.model_actual;
@@ -395,6 +455,7 @@ function monitorControls() {
         : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
       return `<div class="monitor-kicker">${chainMode ? "Chain Visual Monitor" : "Visual Monitor"} · Attempt ${attempt.attempt_no}</div>
         ${livePreview}
+        ${pipelineMarkup(visual, chainLatest)}
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
         <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "同一个 6 秒窗口会联合判断整条原子操作链，并可一次推进多个连续步骤。" : "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。"))}</div>
@@ -458,11 +519,58 @@ function renderEvents() {
   return events.map((event) => `<div class="event-row"><span class="event-time">${formatTime(event.occurred_at)}</span><span class="event-text">${eventDescription(event)}</span></div>`).join("");
 }
 
-function renderExecution() {
-  if (!execution) return;
+function patchMonitorBody() {
+  const body = document.querySelector(".monitor-body");
+  if (!body) return;
+  const template = document.createElement("template");
+  template.innerHTML = monitorControls();
+  const oldPreview = body.querySelector(".live-preview:not(.waiting)");
+  const newPreview = template.content.querySelector(".live-preview:not(.waiting)");
+  if (oldPreview && newPreview && previewCameraId === desiredPreviewCamera()) {
+    const nextModel = newPreview.querySelector(".live-preview-model")?.textContent;
+    const oldModel = oldPreview.querySelector(".live-preview-model");
+    if (oldModel && nextModel) oldModel.textContent = nextModel;
+    newPreview.replaceWith(oldPreview);
+  }
+  body.replaceChildren(template.content);
+}
+
+function patchExecution() {
   const progress = execution.progress || { succeeded: 0, total: execution.steps.length, ratio: 0 };
   const percentage = Math.round(progress.ratio * 100);
-  $("#result").innerHTML = `
+  const statePill = document.querySelector(".state-pill");
+  if (statePill) {
+    statePill.className = `state-pill ${execution.state}`;
+    statePill.textContent = STATE_LABELS[execution.state] || execution.state;
+  }
+  const progressBar = document.querySelector(".progress-bar");
+  if (progressBar) progressBar.style.width = `${percentage}%`;
+  const progressCopy = document.querySelector(".progress-copy");
+  if (progressCopy) progressCopy.textContent = `${progress.succeeded} / ${progress.total} · ${percentage}%`;
+  const steps = document.querySelector(".execution-steps");
+  if (steps) steps.innerHTML = execution.steps.map(renderStep).join("");
+  patchMonitorBody();
+  const logCard = document.querySelector(".log-card");
+  const logCount = logCard?.querySelector("summary .card-heading span, summary > span");
+  if (logCount) logCount.textContent = `${execution.events?.length || 0} 条 · 点击展开`;
+  const eventList = document.querySelector(".event-list");
+  if (eventList) eventList.innerHTML = renderEvents();
+  updateCountdown();
+  updatePipelineClock();
+  syncLivePreview();
+}
+
+function renderExecution() {
+  if (!execution) return;
+  const result = $("#result");
+  if (result.dataset.executionId === execution.execution_id && result.querySelector(".execution-head")) {
+    patchExecution();
+    return;
+  }
+  const progress = execution.progress || { succeeded: 0, total: execution.steps.length, ratio: 0 };
+  const percentage = Math.round(progress.ratio * 100);
+  result.dataset.executionId = execution.execution_id;
+  result.innerHTML = `
     <section class="execution-head fade-in">
       <div class="execution-top">
         <div class="execution-title"><div class="eyebrow">Execution ${esc(execution.execution_id.slice(0, 8))}</div><h2>${esc(execution.instruction)}</h2></div>
@@ -482,6 +590,7 @@ function renderExecution() {
       <div class="event-list">${renderEvents()}</div>
     </details>`;
   updateCountdown();
+  updatePipelineClock();
   syncLivePreview();
 }
 

@@ -260,18 +260,21 @@ failed 边界：
 {chr(10).join(rendered_steps)}
 
 时序与状态规则：
-- 只评估尚未由后端确认的步骤。step_updates 必须按顺序返回这个未确认后缀：{pending_ids}。不得重复输出已确认步骤，也不得自行重新拆解、改名、增删或重排步骤。
+- 只评估尚未由后端确认的步骤。step_updates 必须从当前步骤开始，按顺序返回未确认后缀 {pending_ids} 的连续前缀。
+- 一旦遇到第一个 in_progress、failed 或 unknown 就停止输出，不要再为更后面的尚未执行步骤生成占位结果。只有前面的步骤都 succeeded 才能继续输出下一步。
+- 不得重复输出已确认步骤，也不得跳步、自行重新拆解、改名或重排步骤。
 - 上一窗口摘要不是本窗口的视觉证据，不能直接复制为 evidence；必须结合本次 WINDOW 和 NOW 更新判断。
 - succeeded：视频中有直接证据表明该步骤完成。中间步骤只需在窗口内真实发生过，不要求其后置条件保持到 NOW；例如 Pick 后继续 Carry/Place，Pick 仍可 succeeded。
 - 最后一个步骤以及代表整个任务完成的状态必须在窗口结尾 NOW 仍明确成立；中途成立但 NOW 已撤销，不能判最终成功。
 - in_progress：该步骤正在执行或仍有机会完成；可恢复的抓空、滑脱、掉落后继续尝试属于 in_progress。
+- 如果画面和目标物清晰可见，但当前窗口尚未开始相关动作或目标物仍保持初始状态，返回 in_progress，而不是 unknown。
 - failed：直接可见该步骤已失败；只有 failed 填自然语言 failure_reason，不使用预定义枚举。
 - unknown：遮挡、画质或证据不足，不能可靠判断；不能猜测。
-- 后续步骤不能绕过尚未 succeeded 的前序步骤。若某一步 failed，后续步骤必须是 in_progress 或 unknown，不能 succeeded。
+- 后续步骤不能绕过尚未 succeeded 的前序步骤；若当前步骤 failed，立即在该步骤停止 step_updates。
 - 不能仅凭手靠近、动作停止、夹爪闭合或短暂接触推断成功。
 
 输出规则：
-- step_updates 必须包含未确认后缀中的所有 step_id，每个恰好一次且顺序一致。
+- step_updates 至少包含当前 step_id，并且只能是未确认后缀的连续前缀。
 - evidence 只写直接可见事实，不写隐藏推理、意图、控制建议或 decision。
 - 所有时间戳相对本次 6 秒 WINDOW 开头，范围 0 到 6 秒。
 - 中间步骤 succeeded 的 completion_evidence_timestamp_s 可位于窗口任意时刻。

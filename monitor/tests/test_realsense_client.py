@@ -2,7 +2,10 @@ import unittest
 from collections import deque
 import struct
 
-from monitor.realsense_client import LivePreviewSender, assignment_identity, checkpoint_block_reason, parser, sample_window, uploads_paused
+from monitor.realsense_client import (
+    LivePreviewSender, RealSenseMonitorClient, assignment_identity,
+    checkpoint_block_reason, parser, sample_window, uploads_paused,
+)
 
 
 class FakePreviewImage:
@@ -19,6 +22,22 @@ class FakeImageModule:
     @staticmethod
     def fromarray(frame):
         return FakePreviewImage()
+
+
+class FakeHttpResponse:
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeHttpClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, **kwargs):
+        self.calls.append((path, kwargs))
+        return FakeHttpResponse()
 
 
 class RealSenseClientTests(unittest.TestCase):
@@ -80,6 +99,20 @@ class RealSenseClientTests(unittest.TestCase):
             sender._websocket_url(),
             "wss://example.com/api/visual-monitor/live/ingest/camera%3Aone",
         )
+
+    def test_pipeline_phase_telemetry_contains_window_timestamps(self):
+        client = RealSenseMonitorClient.__new__(RealSenseMonitorClient)
+        client.http = FakeHttpClient()
+        client.report_phase(
+            {"execution_id": "execution-1", "attempt_id": "chain-session"},
+            "camera-1", 2, "uploading", 100.0,
+            window_started_at=94.0, window_ended_at=100.0,
+        )
+        path, kwargs = client.http.calls[0]
+        self.assertEqual(path, "/api/visual-monitor/telemetry")
+        self.assertEqual(kwargs["json"]["phase"], "uploading")
+        self.assertEqual(kwargs["json"]["sequence"], 2)
+        self.assertTrue(kwargs["json"]["window_started_at"].endswith("Z"))
 
     def test_six_second_window_is_downsampled_to_six_fps(self):
         frames = deque(

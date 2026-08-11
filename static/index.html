@@ -359,6 +359,16 @@
   .live-preview-status.live { color:#65d6a3; }
   .live-preview-status.bad { color:#ff8795; }
   .live-preview-status.wait { color:#f1c46d; }
+  .pipeline-panel { margin:8px 0 4px; padding:10px; border:1px solid #e6e8f0; border-radius:9px; background:#fafbfe; }
+  .pipeline-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--text); font-size:11px; }
+  .pipeline-head strong { color:var(--blue); font-variant-numeric:tabular-nums; }
+  .pipeline-panel[data-phase="error"] .pipeline-head strong { color:var(--red); }
+  .pipeline-panel[data-phase="completed"] .pipeline-head strong { color:var(--green); }
+  .pipeline-progress { height:5px; margin:8px 0; overflow:hidden; border-radius:999px; background:#e8eaf2; }
+  .pipeline-progress i { display:block; width:0; height:100%; border-radius:inherit; background:var(--blue); transition:width .12s linear; }
+  .pipeline-panel[data-phase="error"] .pipeline-progress i { background:var(--red); }
+  .pipeline-panel[data-phase="completed"] .pipeline-progress i { background:var(--green); }
+  .pipeline-stages { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 8px; color:var(--muted); font-size:9.5px; font-variant-numeric:tabular-nums; }
   .monitor-evidence { width:100%; max-height:230px; object-fit:contain; margin-top:12px; border-radius:9px; background:#111; }
   .timing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin-top:10px; color:var(--muted); font-size:9.5px; }
   .timing-grid span { padding:5px 3px; border-radius:6px; background:#f4f5f9; }
@@ -447,6 +457,6 @@
   </main>
 </div>
 
-<script src="/app.js?v=chain-visual-monitor-20260811"></script>
+<script src="/app.js?v=chain-monitor-timeline-20260811"></script>
 </body>
 </html>

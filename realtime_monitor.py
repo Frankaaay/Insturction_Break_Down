@@ -89,6 +89,17 @@ CHAIN_OUTPUT_SCHEMA = {
 }
 
 
+class ModelResponseValidationError(ValueError):
+    def __init__(
+        self, message: str, *, raw_body: str, actual_model: str,
+        timings_ms: dict[str, float],
+    ) -> None:
+        super().__init__(message)
+        self.raw_body = raw_body
+        self.actual_model = actual_model
+        self.timings_ms = timings_ms
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -194,8 +205,13 @@ def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> 
     current_index = int(assignment.get("current_step_index", 0))
     expected_ids = [step["step_id"] for step in all_steps[current_index:]]
     updates = value.get("step_updates")
-    if not isinstance(updates, list) or [item.get("step_id") for item in updates] != expected_ids:
-        raise ValueError("step_updates 必须与规划步骤一一对应且顺序一致")
+    if (
+        not isinstance(updates, list)
+        or not updates
+        or len(updates) > len(expected_ids)
+        or [item.get("step_id") for item in updates] != expected_ids[:len(updates)]
+    ):
+        raise ValueError("step_updates 必须是从当前步骤开始的连续前缀")
     step_required = {
         "step_id", "status", "description_zh", "failure_reason", "evidence",
         "completion_evidence_timestamp_s",
@@ -204,17 +220,14 @@ def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> 
         if not isinstance(item, dict) or set(item) != step_required:
             raise ValueError("step_update 字段与契约不一致")
         _validate_observation_fields(item, final_step=current_index + index == len(all_steps) - 1)
-    first_non_success = next((i for i, item in enumerate(updates) if item["status"] != "succeeded"), len(updates))
-    if any(item["status"] == "succeeded" for item in updates[first_non_success + 1:]):
-        raise ValueError("模型不能跳过未成功的前序步骤")
-    if any(item["status"] == "failed" for item in updates[first_non_success + 1:]):
-        raise ValueError("失败只能落在第一个尚未成功的步骤")
-    derived = (
-        "succeeded" if all(item["status"] == "succeeded" for item in updates)
-        else "failed" if any(item["status"] == "failed" for item in updates)
-        else value.get("status")
-    )
-    if value.get("status") != derived or derived not in {"in_progress", "succeeded", "failed", "unknown"}:
+    if any(item["status"] != "succeeded" for item in updates[:-1]):
+        raise ValueError("第一个未成功步骤之后不得继续输出 step_updates")
+    last_status = updates[-1]["status"]
+    if len(updates) < len(expected_ids) and last_status == "succeeded":
+        raise ValueError("成功前缀不能遗漏紧随其后的未完成步骤")
+    all_completed = len(updates) == len(expected_ids) and last_status == "succeeded"
+    derived = "succeeded" if all_completed else last_status
+    if value.get("status") != derived:
         raise ValueError("顶层 status 与逐步状态不一致")
     task_completion = value.get("task_completion_evidence_timestamp_s")
     if derived == "succeeded":
@@ -347,7 +360,14 @@ class VisualMonitorService:
                     next_state = "awaiting_confirmation" if result["status"] == "failed" else "observing"
                     await self.update_callback(
                         **common,
-                        patch={"state": next_state, "latest": latest, "active_sequence": None},
+                        patch={
+                            "state": next_state, "latest": latest, "active_sequence": None,
+                            "pipeline": {
+                                "phase": "completed", "sequence": job["sequence"],
+                                "phase_started_at": latest["observed_at"],
+                                "timings_ms": latest["timings_ms"],
+                            },
+                        },
                         event_type="visual_monitor.observation",
                     )
             except ExecutionConflictError:
@@ -356,10 +376,45 @@ class VisualMonitorService:
                 # the newly active step or turn the completed job into a second error update.
                 return
         except Exception as exc:
+            error_timings = getattr(exc, "timings_ms", {})
+            error_latest = {
+                "status": "unknown",
+                "description_zh": "视觉模型请求失败",
+                "failure_reason": None,
+                "error": str(exc),
+                "sequence": job["sequence"],
+                "model_requested": self.config.model,
+                "model_actual": getattr(exc, "actual_model", None),
+                "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
+                "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
+                "timings_ms": {
+                    **job["client_timings"],
+                    **error_timings,
+                    "server_job_total": round((time.perf_counter() - started) * 1000, 1),
+                },
+                "observed_at": utc_iso(),
+            }
+            job["video_path"].with_suffix(".json").write_text(
+                json.dumps({
+                    "latest": error_latest,
+                    "raw": getattr(exc, "raw_body", None),
+                    "validation_error": str(exc),
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             try:
                 await self.update_callback(
                     **common,
-                    patch={"state": "error", "active_sequence": None, "latest": {"status": "unknown", "description_zh": "视觉模型请求失败", "failure_reason": None, "error": str(exc), "sequence": job["sequence"], "observed_at": utc_iso()}},
+                    patch={
+                        "state": "error", "active_sequence": None,
+                        "latest": error_latest,
+                        "pipeline": {
+                            "phase": "error", "sequence": job["sequence"],
+                            "phase_started_at": error_latest["observed_at"],
+                            "error": str(exc),
+                            "timings_ms": error_latest["timings_ms"],
+                        },
+                    },
                     event_type="visual_monitor.error",
                 )
             except ExecutionConflictError:
@@ -383,7 +438,7 @@ class VisualMonitorService:
         if chain_mode:
             pending_count = len(assignment.get("steps", [])) - int(assignment.get("current_step_index", 0))
             output_schema["properties"]["step_updates"].update({
-                "minItems": pending_count,
+                "minItems": 1,
                 "maxItems": pending_count,
             })
         prompt = build_chain_monitor_prompt(assignment, sequence) if chain_mode else build_monitor_prompt(assignment, sequence)
@@ -422,14 +477,21 @@ class VisualMonitorService:
         raw_body = b"".join(chunks).decode("utf-8")
         body = json.loads(raw_body)
         content = body["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        result = validate_chain_result(parsed, assignment) if chain_mode else validate_result(parsed)
-        return result, {
+        timings = {
             "base64_prepare": round(prep_ms, 1),
             "bailian_first_byte": round(((first_byte or finished) - request_started) * 1000, 1),
             "bailian_download": round((finished - (first_byte or finished)) * 1000, 1),
             "bailian_total": round((finished - request_started) * 1000, 1),
-        }, str(body.get("model") or self.config.model), raw_body
+        }
+        actual_model = str(body.get("model") or self.config.model)
+        try:
+            parsed = json.loads(content)
+            result = validate_chain_result(parsed, assignment) if chain_mode else validate_result(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ModelResponseValidationError(
+                str(exc), raw_body=raw_body, actual_model=actual_model, timings_ms=timings,
+            ) from exc
+        return result, timings, actual_model, raw_body
 
     @staticmethod
     def _extract_frame(video_path: Path, output_path: Path, timestamp: float) -> None:

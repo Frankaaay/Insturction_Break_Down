@@ -414,6 +414,7 @@ class ExecutionManager:
                 "baseline_url": None,
                 "baseline_captured_at": None,
                 "active_sequence": None,
+                "pipeline": None,
             })
             self._record_event_locked(execution, "visual_monitor.resumed", {
                 "step_id": self._current_step_locked(execution)["step_id"],
@@ -470,6 +471,45 @@ class ExecutionManager:
             })
             return self._snapshot_locked(execution)
 
+    async def update_visual_pipeline(
+        self, execution_id: str, *, attempt_id: str, camera_id: str,
+        pipeline: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Store non-authoritative capture/upload timing for the operator UI."""
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            mode = execution.get("execution_mode")
+            if execution["state"] != "running" or mode not in {"visual_monitor", "chain_visual_monitor"}:
+                raise ExecutionConflictError("Visual Monitor pipeline 已过期")
+            if mode == "chain_visual_monitor":
+                monitor = execution.get("chain_visual_monitor") or {}
+                valid = (
+                    monitor.get("monitor_session_id") == attempt_id
+                    and monitor.get("camera_id") == camera_id
+                )
+                event_type = "chain_visual_monitor.pipeline"
+            else:
+                attempt = execution.get("active_attempt") or {}
+                monitor = attempt.get("visual_monitor") or {}
+                valid = (
+                    attempt.get("attempt_id") == attempt_id
+                    and monitor.get("camera_id") == camera_id
+                )
+                event_type = "visual_monitor.pipeline"
+            if not valid:
+                raise ExecutionConflictError("Visual Monitor pipeline session 不匹配")
+            incoming_sequence = int(pipeline.get("sequence", 0))
+            current_sequence = int((monitor.get("pipeline") or {}).get("sequence", 0))
+            if incoming_sequence < current_sequence:
+                raise ExecutionConflictError("Visual Monitor pipeline sequence 已过期")
+            monitor["pipeline"] = copy.deepcopy(pipeline)
+            self._record_event_locked(execution, event_type, {
+                "camera_id": camera_id,
+                "sequence": incoming_sequence,
+                "phase": pipeline.get("phase"),
+            })
+            return self._snapshot_locked(execution)
+
     async def complete_visual_success(
         self,
         execution_id: str,
@@ -504,6 +544,11 @@ class ExecutionManager:
                 "state": "succeeded",
                 "active_sequence": None,
                 "latest": copy.deepcopy(latest),
+                "pipeline": {
+                    "phase": "completed", "sequence": latest.get("sequence"),
+                    "phase_started_at": latest.get("observed_at") or _iso(),
+                    "timings_ms": copy.deepcopy(latest.get("timings_ms", {})),
+                },
             })
             step = self._current_step_locked(execution)
             self._record_event_locked(execution, "visual_monitor.observation", {
@@ -615,13 +660,26 @@ class ExecutionManager:
             if current is None:
                 raise ExecutionConflictError("会话当前没有步骤")
             expected_ids = [step["step_id"] for step in execution["steps"][current:]]
-            if [item.get("step_id") for item in updates] != expected_ids:
+            if (
+                not updates
+                or len(updates) > len(expected_ids)
+                or [item.get("step_id") for item in updates] != expected_ids[:len(updates)]
+                or any(item.get("status") != "succeeded" for item in updates[:-1])
+                or (len(updates) < len(expected_ids) and updates[-1].get("status") == "succeeded")
+            ):
                 raise ExecutionConflictError("整链结果与当前规划不匹配")
             for index in range(current):
                 if execution["steps"][index]["status"] != "succeeded":
                     raise ExecutionConflictError("整链步骤账本不连续")
 
-            monitor.update({"latest": copy.deepcopy(latest), "active_sequence": None})
+            monitor.update({
+                "latest": copy.deepcopy(latest), "active_sequence": None,
+                "pipeline": {
+                    "phase": "completed", "sequence": latest.get("sequence"),
+                    "phase_started_at": latest.get("observed_at") or _iso(),
+                    "timings_ms": copy.deepcopy(latest.get("timings_ms", {})),
+                },
+            })
             self._record_event_locked(execution, "chain_visual_monitor.observation", {
                 "camera_id": camera_id, "status": latest.get("status"),
                 "sequence": latest.get("sequence"),
@@ -1288,6 +1346,7 @@ class ExecutionManager:
                     "active_sequence": None,
                     "baseline_url": None,
                     "baseline_captured_at": None,
+                    "pipeline": None,
                 })
             self._record_event_locked(execution, "execution.resumed", {
                 "step_id": step["step_id"],

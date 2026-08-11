@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -93,6 +94,17 @@ class VisualClaimRequest(BaseModel):
 
 class VisualResumeRequest(BaseModel):
     attempt_id: str = Field(min_length=1, max_length=128)
+
+
+class VisualTelemetryRequest(BaseModel):
+    execution_id: str = Field(min_length=1, max_length=128)
+    attempt_id: str = Field(min_length=1, max_length=128)
+    camera_id: str = Field(min_length=1, max_length=128)
+    sequence: int = Field(ge=1)
+    phase: Literal["capturing", "encoding", "uploading"]
+    phase_started_at: str
+    window_started_at: str | None = None
+    window_ended_at: str | None = None
 
 
 class MonitorReportRequest(BaseModel):
@@ -185,6 +197,17 @@ async def _authenticate_websocket(websocket: WebSocket, config_name: str) -> boo
 
 def _valid_camera_id(camera_id: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", camera_id))
+
+
+def _elapsed_iso_ms(started_at: str | None, ended_at: str) -> float | None:
+    if not started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        return max(0.0, (ended - started).total_seconds() * 1000)
+    except ValueError:
+        return None
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -424,6 +447,24 @@ async def claim_visual_monitor(
     )}
 
 
+@app.post("/api/visual-monitor/telemetry")
+async def update_visual_telemetry(
+    req: VisualTelemetryRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_visual_monitor(authorization)
+    try:
+        snapshot = await execution_manager.update_visual_pipeline(
+            req.execution_id,
+            attempt_id=req.attempt_id,
+            camera_id=req.camera_id,
+            pipeline=req.model_dump(),
+        )
+        return {"accepted": True, "execution": snapshot}
+    except (ExecutionNotFoundError, ExecutionConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
 @app.websocket("/api/visual-monitor/live/ingest/{camera_id}")
 async def ingest_live_preview(websocket: WebSocket, camera_id: str) -> None:
     if not _valid_camera_id(camera_id):
@@ -524,6 +565,7 @@ async def upload_visual_checkpoint(
     window_ended_at: str = Form(...),
     capture_ms: float = Form(..., ge=0),
     encode_ms: float = Form(..., ge=0),
+    upload_started_at: str | None = Form(default=None),
     video: UploadFile = File(...),
     now_image: UploadFile = File(...),
     authorization: str | None = Header(default=None),
@@ -550,6 +592,23 @@ async def upload_visual_checkpoint(
             camera_id=camera_id,
             sequence=sequence,
         )
+        upload_received_at = utc_iso()
+        await execution_manager.update_visual_pipeline(
+            execution_id,
+            attempt_id=attempt_id,
+            camera_id=camera_id,
+            pipeline={
+                "phase": "inferencing",
+                "sequence": sequence,
+                "phase_started_at": utc_iso(),
+                "window_started_at": window_started_at,
+                "window_ended_at": window_ended_at,
+                "upload_started_at": upload_started_at,
+                "upload_received_at": upload_received_at,
+                "capture_ms": capture_ms,
+                "encode_ms": encode_ms,
+            },
+        )
         try:
             await visual_monitor.submit(
                 assignment=assignment,
@@ -561,6 +620,9 @@ async def upload_visual_checkpoint(
                 client_timings={
                     "capture": capture_ms,
                     "encode": encode_ms,
+                    "upload_to_server": round(
+                        _elapsed_iso_ms(upload_started_at, upload_received_at) or 0.0, 1,
+                    ),
                     "server_write": round(write_ms, 1),
                 },
             )

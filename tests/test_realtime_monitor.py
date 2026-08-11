@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 from realtime_monitor import (
-    VisualMonitorConfig, VisualMonitorService, validate_chain_result, validate_result,
+    ModelResponseValidationError, VisualMonitorConfig, VisualMonitorService,
+    validate_chain_result, validate_result,
 )
 from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
 
@@ -27,7 +28,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         }
         prompt = build_chain_monitor_prompt(assignment, 1)
         self.assertIn("中间步骤只需在窗口内真实发生过", prompt)
-        self.assertIn("不得自行重新拆解", prompt)
+        self.assertIn("自行重新拆解", prompt)
         self.assertIn("原始指令：拿起水壶并放到桌子上", prompt)
         self.assertIn("手正在靠近水壶", prompt)
         self.assertIn("上一窗口摘要不是本窗口的视觉证据", prompt)
@@ -61,8 +62,73 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             {"step_id": "pick", "status": "succeeded", "description_zh": "历史步骤", "failure_reason": None, "evidence": [{"timestamp_s": 1.0, "observation": "当前窗口无关证据"}], "completion_evidence_timestamp_s": 1.0},
             *valid["step_updates"],
         ]}
-        with self.assertRaisesRegex(ValueError, "一一对应"):
+        with self.assertRaisesRegex(ValueError, "连续前缀"):
             validate_chain_result(invalid, assignment)
+
+    def test_chain_result_accepts_wrong_object_failure_without_future_placeholders(self):
+        assignment = {
+            "current_step_index": 0,
+            "steps": [{"step_id": "pick"}, {"step_id": "carry"}, {"step_id": "place"}],
+        }
+        result = {
+            "status": "failed", "description_zh": "第一步拿错了物体",
+            "task_completion_evidence_timestamp_s": None,
+            "step_updates": [{
+                "step_id": "pick", "status": "failed", "description_zh": "拿起了蓝色塑料包",
+                "failure_reason": "手拿起的是水壶旁边的蓝色塑料包，水壶仍留在桌面",
+                "evidence": [{"timestamp_s": 4.5, "observation": "蓝色塑料包被手提离桌面，黑色水壶保持原位"}],
+                "completion_evidence_timestamp_s": None,
+            }],
+        }
+        self.assertEqual(validate_chain_result(result, assignment)["status"], "failed")
+
+    def test_chain_result_stops_at_first_non_success(self):
+        assignment = {
+            "current_step_index": 0,
+            "steps": [{"step_id": "pick"}, {"step_id": "carry"}, {"step_id": "place"}],
+        }
+        common = {
+            "failure_reason": None,
+            "evidence": [{"timestamp_s": 2.0, "observation": "直接可见事实"}],
+            "completion_evidence_timestamp_s": None,
+        }
+        after_failure = {
+            "status": "failed", "description_zh": "拿错物体",
+            "task_completion_evidence_timestamp_s": None,
+            "step_updates": [
+                {**common, "step_id": "pick", "status": "failed", "failure_reason": "拿起了手机", "description_zh": "拿起手机"},
+                {**common, "step_id": "carry", "status": "in_progress", "description_zh": "未执行"},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "第一个未成功步骤"):
+            validate_chain_result(after_failure, assignment)
+
+        omitted_next_step = {
+            "status": "succeeded", "description_zh": "只报告拿起成功",
+            "task_completion_evidence_timestamp_s": 5.5,
+            "step_updates": [{
+                **common, "step_id": "pick", "status": "succeeded", "description_zh": "已拿起",
+                "completion_evidence_timestamp_s": 2.0,
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "成功前缀不能遗漏"):
+            validate_chain_result(omitted_next_step, assignment)
+
+    def test_chain_prompt_treats_visible_no_action_as_in_progress(self):
+        assignment = {
+            "instruction": "拿起水壶并放到桌子上",
+            "current_step_index": 0,
+            "confirmed_steps": [],
+            "unfinished_steps": [{"step_id": "pick", "status": "in_progress", "description_zh": None}],
+            "steps": [{
+                "step_id": "pick", "action_id": "A_001", "logic": 0,
+                "slots": {"obj_a": "水壶"}, "zh": "拿起水壶",
+            }],
+        }
+        prompt = build_chain_monitor_prompt(assignment, 2)
+        self.assertIn("仍保持初始状态，返回 in_progress，而不是 unknown", prompt)
+        self.assertIn("一旦遇到第一个 in_progress、failed 或 unknown 就停止输出", prompt)
+
     def test_result_null_rules_and_pick_occlusion_prompt(self):
         valid = validate_result({
             "status": "failed",
@@ -317,4 +383,43 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
             self.assertEqual(chain_results[0]["attempt_id"], "chain-session")
             self.assertEqual(chain_results[0]["latest"]["step_updates"][0]["completion_evidence_url"].startswith("/api/visual-monitor/media/"), True)
+            await service.close()
+
+    async def test_validation_failure_persists_raw_model_response(self):
+        updates = []
+
+        async def update(**kwargs):
+            updates.append(kwargs)
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = VisualMonitorService(update, VisualMonitorConfig(Path(directory)))
+
+            async def invalid(*args):
+                raise ModelResponseValidationError(
+                    "模型 evidence 非法", raw_body='{"raw":"response"}',
+                    actual_model="qwen3.7-plus", timings_ms={"bailian_total": 8400.0},
+                )
+
+            service._call_bailian = invalid
+            baseline = Path(directory) / "before.jpg"
+            video = Path(directory) / "window.mp4"
+            now = Path(directory) / "now.jpg"
+            baseline.write_bytes(b"image")
+            video.write_bytes(b"video")
+            now.write_bytes(b"now")
+            await service.submit(
+                assignment={"execution_id": "e", "attempt_id": "a", "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}},
+                camera_id="c", sequence=1, baseline_path=baseline,
+                video_path=video, now_path=now, client_timings={"encode": 100.0},
+            )
+            for _ in range(50):
+                if not service.in_flight:
+                    break
+                import asyncio
+                await asyncio.sleep(0.01)
+            saved = __import__("json").loads(video.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["raw"], '{"raw":"response"}')
+            self.assertEqual(saved["validation_error"], "模型 evidence 非法")
+            self.assertEqual(updates[-1]["patch"]["pipeline"]["phase"], "error")
             await service.close()
