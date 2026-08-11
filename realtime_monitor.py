@@ -36,7 +36,7 @@ OUTPUT_SCHEMA = {
         "completion_evidence_timestamp_s",
     ],
     "properties": {
-        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed", "unknown"]},
+        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed"]},
         "description_zh": {"type": "string"},
         "failure_reason": {"type": ["string", "null"]},
         "evidence": {
@@ -64,7 +64,7 @@ CHAIN_STEP_SCHEMA = {
     ],
     "properties": {
         "step_id": {"type": "string"},
-        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed", "unknown"]},
+        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed"]},
         "description_zh": {"type": "string"},
         "failure_reason": {"type": ["string", "null"]},
         "evidence": OUTPUT_SCHEMA["properties"]["evidence"],
@@ -79,7 +79,7 @@ CHAIN_OUTPUT_SCHEMA = {
     "additionalProperties": False,
     "required": ["status", "description_zh", "step_updates", "task_completion_evidence_timestamp_s"],
     "properties": {
-        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed", "unknown"]},
+        "status": {"type": "string", "enum": ["in_progress", "succeeded", "failed"]},
         "description_zh": {"type": "string"},
         "step_updates": {"type": "array", "minItems": 1, "items": CHAIN_STEP_SCHEMA},
         "task_completion_evidence_timestamp_s": {
@@ -92,12 +92,17 @@ CHAIN_OUTPUT_SCHEMA = {
 class ModelResponseValidationError(ValueError):
     def __init__(
         self, message: str, *, raw_body: str, actual_model: str,
-        timings_ms: dict[str, float],
+        timings_ms: dict[str, float], model_content: Any = None,
+        normalized_json: dict[str, Any] | None = None,
+        normalization_applied: list[str] | None = None,
     ) -> None:
         super().__init__(message)
         self.raw_body = raw_body
         self.actual_model = actual_model
         self.timings_ms = timings_ms
+        self.model_content = model_content
+        self.normalized_json = normalized_json
+        self.normalization_applied = normalization_applied or []
 
 
 def utc_iso() -> str:
@@ -123,15 +128,38 @@ class VisualMonitorConfig:
         )
 
 
+def normalize_model_json(value: Any) -> tuple[dict[str, Any], list[str]]:
+    """Normalize only known provider deviations before strict validation."""
+    applied: list[str] = []
+    if isinstance(value, list):
+        if len(value) != 1 or not isinstance(value[0], dict):
+            raise ValueError("模型顶层数组必须只包含一个 JSON 对象")
+        value = value[0]
+        applied.append("unwrapped_singleton_array")
+    if not isinstance(value, dict):
+        raise ValueError("模型 JSON 顶层必须是对象")
+    normalized = copy.deepcopy(value)
+    if normalized.get("status") == "unknown":
+        normalized["status"] = "in_progress"
+        applied.append("top_status_unknown_to_in_progress")
+    updates = normalized.get("step_updates")
+    if isinstance(updates, list):
+        for index, item in enumerate(updates):
+            if isinstance(item, dict) and item.get("status") == "unknown":
+                item["status"] = "in_progress"
+                applied.append(f"step_{index}_status_unknown_to_in_progress")
+    return normalized, applied
+
+
 def validate_result(value: dict[str, Any]) -> dict[str, Any]:
     required = {
         "status", "description_zh", "failure_reason", "evidence",
         "completion_evidence_timestamp_s",
     }
-    if set(value) != required:
+    if not isinstance(value, dict) or set(value) != required:
         raise ValueError("模型 JSON 字段与契约不一致")
     status = value.get("status")
-    if status not in {"in_progress", "succeeded", "failed", "unknown"}:
+    if status not in {"in_progress", "succeeded", "failed"}:
         raise ValueError("模型 status 非法")
     reason = value.get("failure_reason")
     if status == "failed":
@@ -147,7 +175,12 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("succeeded 的完成证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
-    if not value.get("description_zh", "").strip() or not isinstance(value.get("evidence"), list) or not value["evidence"]:
+    if (
+        not isinstance(value.get("description_zh"), str)
+        or not value["description_zh"].strip()
+        or not isinstance(value.get("evidence"), list)
+        or not value["evidence"]
+    ):
         raise ValueError("模型描述或 evidence 非法")
     for item in value["evidence"]:
         if (
@@ -164,7 +197,7 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_observation_fields(value: dict[str, Any], *, final_step: bool = False) -> None:
     status = value.get("status")
-    if status not in {"in_progress", "succeeded", "failed", "unknown"}:
+    if status not in {"in_progress", "succeeded", "failed"}:
         raise ValueError("模型 status 非法")
     reason = value.get("failure_reason")
     if status == "failed":
@@ -199,18 +232,17 @@ def _validate_observation_fields(value: dict[str, Any], *, final_step: bool = Fa
 
 def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> dict[str, Any]:
     required = {"status", "description_zh", "step_updates", "task_completion_evidence_timestamp_s"}
-    if set(value) != required:
+    if not isinstance(value, dict) or set(value) != required:
         raise ValueError("整链模型 JSON 字段与契约不一致")
     all_steps = assignment.get("steps", [])
     current_index = int(assignment.get("current_step_index", 0))
     expected_ids = [step["step_id"] for step in all_steps[current_index:]]
     updates = value.get("step_updates")
-    if (
-        not isinstance(updates, list)
-        or not updates
-        or len(updates) > len(expected_ids)
-        or [item.get("step_id") for item in updates] != expected_ids[:len(updates)]
-    ):
+    if not isinstance(updates, list) or not updates or len(updates) > len(expected_ids):
+        raise ValueError("step_updates 必须是从当前步骤开始的连续前缀")
+    if any(not isinstance(item, dict) for item in updates):
+        raise ValueError("step_update 必须是 JSON 对象")
+    if [item.get("step_id") for item in updates] != expected_ids[:len(updates)]:
         raise ValueError("step_updates 必须是从当前步骤开始的连续前缀")
     step_required = {
         "step_id", "status", "description_zh", "failure_reason", "evidence",
@@ -312,9 +344,14 @@ class VisualMonitorService:
             "camera_id": job["camera_id"],
         }
         try:
-            result, timings, actual_model, raw = await self._call_bailian(
+            call_result = await self._call_bailian(
                 assignment, job["sequence"], job["baseline_path"], job["video_path"], job["now_path"]
             )
+            if len(call_result) == 4:
+                result, timings, actual_model, raw = call_result
+                response_diagnostics = {}
+            else:
+                result, timings, actual_model, raw, response_diagnostics = call_result
             chain_mode = assignment.get("monitor_scope") == "chain"
             evidence_url = None
             if chain_mode:
@@ -346,7 +383,11 @@ class VisualMonitorService:
                 "observed_at": utc_iso(),
             }
             log_path = job["video_path"].with_suffix(".json")
-            log_path.write_text(json.dumps({"latest": latest, "raw": raw}, ensure_ascii=False, indent=2), encoding="utf-8")
+            log_path.write_text(json.dumps({
+                "latest": latest,
+                "raw": raw,
+                **response_diagnostics,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
             try:
                 if chain_mode:
                     if self.chain_result_callback is None:
@@ -378,7 +419,7 @@ class VisualMonitorService:
         except Exception as exc:
             error_timings = getattr(exc, "timings_ms", {})
             error_latest = {
-                "status": "unknown",
+                "status": "in_progress",
                 "description_zh": "视觉模型请求失败",
                 "failure_reason": None,
                 "error": str(exc),
@@ -398,6 +439,9 @@ class VisualMonitorService:
                 json.dumps({
                     "latest": error_latest,
                     "raw": getattr(exc, "raw_body", None),
+                    "model_content": getattr(exc, "model_content", None),
+                    "normalized_json": getattr(exc, "normalized_json", None),
+                    "normalization_applied": getattr(exc, "normalization_applied", []),
                     "validation_error": str(exc),
                 }, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -424,7 +468,7 @@ class VisualMonitorService:
     async def _call_bailian(
         self, assignment: dict[str, Any], sequence: int, baseline_path: Path,
         video_path: Path, now_path: Path,
-    ) -> tuple[dict[str, Any], dict[str, float], str, str]:
+    ) -> tuple[dict[str, Any], dict[str, float], str, str, dict[str, Any]]:
         key = os.getenv("DASHSCOPE_API_KEY", "")
         if not key:
             raise RuntimeError("服务器未配置 DASHSCOPE_API_KEY")
@@ -475,23 +519,47 @@ class VisualMonitorService:
             response.raise_for_status()
         finished = time.perf_counter()
         raw_body = b"".join(chunks).decode("utf-8")
-        body = json.loads(raw_body)
-        content = body["choices"][0]["message"]["content"]
         timings = {
             "base64_prepare": round(prep_ms, 1),
             "bailian_first_byte": round(((first_byte or finished) - request_started) * 1000, 1),
             "bailian_download": round((finished - (first_byte or finished)) * 1000, 1),
             "bailian_total": round((finished - request_started) * 1000, 1),
         }
-        actual_model = str(body.get("model") or self.config.model)
+        actual_model = self.config.model
+        content: Any = None
+        normalized: dict[str, Any] | None = None
+        normalization_applied: list[str] = []
         try:
-            parsed = json.loads(content)
-            result = validate_chain_result(parsed, assignment) if chain_mode else validate_result(parsed)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            body = json.loads(raw_body)
+            if not isinstance(body, dict):
+                raise ValueError("百炼响应顶层必须是 JSON 对象")
+            actual_model = str(body.get("model") or self.config.model)
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise ValueError("百炼响应 choices 非法")
+            message = choices[0].get("message")
+            if not isinstance(message, dict) or "content" not in message:
+                raise ValueError("百炼响应 message.content 非法")
+            content = message["content"]
+            if isinstance(content, str):
+                parsed = json.loads(content)
+            elif isinstance(content, (dict, list)):
+                parsed = content
+            else:
+                raise ValueError("模型 message.content 必须是 JSON 文本、对象或数组")
+            normalized, normalization_applied = normalize_model_json(parsed)
+            result = validate_chain_result(normalized, assignment) if chain_mode else validate_result(normalized)
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
             raise ModelResponseValidationError(
                 str(exc), raw_body=raw_body, actual_model=actual_model, timings_ms=timings,
+                model_content=content, normalized_json=normalized,
+                normalization_applied=normalization_applied,
             ) from exc
-        return result, timings, actual_model, raw_body
+        return result, timings, actual_model, raw_body, {
+            "model_content": content,
+            "normalized_json": normalized,
+            "normalization_applied": normalization_applied,
+        }
 
     @staticmethod
     def _extract_frame(video_path: Path, output_path: Path, timestamp: float) -> None:

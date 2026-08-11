@@ -3,13 +3,23 @@ import unittest
 from pathlib import Path
 
 from realtime_monitor import (
-    ModelResponseValidationError, VisualMonitorConfig, VisualMonitorService,
-    validate_chain_result, validate_result,
+    CHAIN_OUTPUT_SCHEMA, OUTPUT_SCHEMA, ModelResponseValidationError,
+    VisualMonitorConfig, VisualMonitorService,
+    normalize_model_json, validate_chain_result, validate_result,
 )
 from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
 
 
 class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_schemas_expose_only_three_business_states(self):
+        expected = ["in_progress", "succeeded", "failed"]
+        self.assertEqual(OUTPUT_SCHEMA["properties"]["status"]["enum"], expected)
+        self.assertEqual(CHAIN_OUTPUT_SCHEMA["properties"]["status"]["enum"], expected)
+        self.assertEqual(
+            CHAIN_OUTPUT_SCHEMA["properties"]["step_updates"]["items"]["properties"]["status"]["enum"],
+            expected,
+        )
+
     def test_chain_prompt_and_result_allow_fast_intermediate_steps(self):
         assignment = {
             "instruction": "拿起水壶并放到桌子上",
@@ -17,8 +27,8 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             "confirmed_steps": [],
             "unfinished_steps": [
                 {"step_id": "pick", "status": "in_progress", "description_zh": "手正在靠近水壶"},
-                {"step_id": "carry", "status": "unknown", "description_zh": None},
-                {"step_id": "place", "status": "unknown", "description_zh": None},
+                {"step_id": "carry", "status": "in_progress", "description_zh": None},
+                {"step_id": "place", "status": "in_progress", "description_zh": None},
             ],
             "steps": [
                 {"step_id": "pick", "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}, "zh": "拿起水壶"},
@@ -126,8 +136,9 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             }],
         }
         prompt = build_chain_monitor_prompt(assignment, 2)
-        self.assertIn("仍保持初始状态，返回 in_progress，而不是 unknown", prompt)
-        self.assertIn("一旦遇到第一个 in_progress、failed 或 unknown 就停止输出", prompt)
+        self.assertIn("仍保持初始状态，返回 in_progress", prompt)
+        self.assertIn("一旦遇到第一个 in_progress 或 failed 就停止输出", prompt)
+        self.assertNotIn("unknown：", prompt)
 
     def test_result_null_rules_and_pick_occlusion_prompt(self):
         valid = validate_result({
@@ -152,7 +163,67 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NOW 画面中已经放回", prompt)
         self.assertIn("窗口中途曾经满足、但结尾已不满足", prompt)
         self.assertIn("最后 1 秒", prompt)
-        self.assertIn("unknown", prompt)
+        self.assertIn("无法确认物体身份时返回 in_progress", prompt)
+        self.assertNotIn("unknown：", prompt)
+
+    def test_model_json_normalization_is_finite_and_type_safe(self):
+        normalized, applied = normalize_model_json([{
+            "status": "unknown",
+            "step_updates": [{"status": "unknown"}],
+        }])
+        self.assertEqual(normalized["status"], "in_progress")
+        self.assertEqual(normalized["step_updates"][0]["status"], "in_progress")
+        self.assertEqual(applied, [
+            "unwrapped_singleton_array",
+            "top_status_unknown_to_in_progress",
+            "step_0_status_unknown_to_in_progress",
+        ])
+        for invalid in ([], [{}, {}], [[{}]], "text", 1, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    normalize_model_json(invalid)
+
+    def test_singleton_array_wrong_object_response_validates_after_unwrap(self):
+        assignment = {
+            "current_step_index": 0,
+            "steps": [{"step_id": "pick"}, {"step_id": "carry"}, {"step_id": "place"}],
+        }
+        provider_value = [{
+            "status": "failed",
+            "description_zh": "拿起的是塑料袋而不是水壶",
+            "step_updates": [{
+                "step_id": "pick",
+                "status": "failed",
+                "description_zh": "实际拿起了蓝色塑料袋",
+                "failure_reason": "操作对象与指定水壶不一致",
+                "evidence": [{
+                    "timestamp_s": 1.2,
+                    "observation": "蓝色塑料袋被手提起离开桌面",
+                }],
+                "completion_evidence_timestamp_s": None,
+            }],
+            "task_completion_evidence_timestamp_s": None,
+        }]
+        normalized, applied = normalize_model_json(provider_value)
+        result = validate_chain_result(normalized, assignment)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(applied, ["unwrapped_singleton_array"])
+
+    def test_validators_reject_non_objects_without_python_type_errors(self):
+        assignment = {"current_step_index": 0, "steps": [{"step_id": "pick"}]}
+        for invalid in ([], ["bad"], "bad", 1, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    validate_result(invalid)
+                with self.assertRaises(ValueError):
+                    validate_chain_result(invalid, assignment)
+        malformed_chain = {
+            "status": "in_progress", "description_zh": "仍在执行",
+            "task_completion_evidence_timestamp_s": None,
+            "step_updates": ["not-an-object"],
+        }
+        with self.assertRaisesRegex(ValueError, "必须是 JSON 对象"):
+            validate_chain_result(malformed_chain, assignment)
 
     def test_result_timestamps_must_stay_inside_six_second_window(self):
         with self.assertRaises(ValueError):
@@ -181,7 +252,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         carry = build_monitor_prompt({
             "action_id": "A_003", "logic": 0, "slots": {"obj_a": "水壶"}
         }, 1)
-        self.assertIn("宽松成功、极窄失败", carry)
+        self.assertIn("移动慢、暂时停止", carry)
         self.assertIn("不要求判断最终目标位置", carry)
         self.assertIn("仅在明确搬运了错误物体", carry)
 
@@ -189,7 +260,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             "action_id": "A_002", "logic": 1,
             "slots": {"obj_a": "水壶", "sur_a": "桌子"},
         }, 1)
-        self.assertIn("指定表面承托", place)
+        self.assertIn("由该表面承托", place)
         self.assertIn("手已经释放", place)
         self.assertIn("failure_reason 必须为 null", place)
 
@@ -421,5 +492,6 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             saved = __import__("json").loads(video.with_suffix(".json").read_text(encoding="utf-8"))
             self.assertEqual(saved["raw"], '{"raw":"response"}')
             self.assertEqual(saved["validation_error"], "模型 evidence 非法")
+            self.assertEqual(saved["latest"]["status"], "in_progress")
             self.assertEqual(updates[-1]["patch"]["pipeline"]["phase"], "error")
             await service.close()

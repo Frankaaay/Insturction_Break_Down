@@ -280,6 +280,9 @@ class ExecutionManager:
                         for item in (monitor.get("latest") or {}).get("step_updates", [])
                     }
                     current_index = execution["current_step_index"]
+                    previous_status = (monitor.get("latest") or {}).get("status")
+                    if previous_status not in {None, "succeeded", "in_progress", "failed"}:
+                        previous_status = "in_progress"
                     return {
                         "execution_id": execution_id,
                         "attempt_id": monitor["monitor_session_id"],
@@ -293,10 +296,15 @@ class ExecutionManager:
                         "current_step_index": current_index,
                         "unfinished_steps": [{
                             "step_id": step["step_id"],
-                            "status": (previous_by_step.get(step["step_id"]) or {}).get("status", "unknown"),
+                            "status": (
+                                (previous_by_step.get(step["step_id"]) or {}).get("status")
+                                if (previous_by_step.get(step["step_id"]) or {}).get("status")
+                                in {"succeeded", "in_progress", "failed"}
+                                else "in_progress"
+                            ),
                             "description_zh": (previous_by_step.get(step["step_id"]) or {}).get("description_zh"),
                         } for step in execution["steps"][current_index:]],
-                        "previous_status": (monitor.get("latest") or {}).get("status"),
+                        "previous_status": previous_status,
                         "monitor_state": monitor.get("state"),
                         "monitor_epoch": monitor.get("monitor_epoch", 1),
                         "model_requested": monitor.get("model_requested"),

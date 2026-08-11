@@ -210,6 +210,37 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["steps"][0]["status"], "active")
         self.assertEqual(snapshot["chain_visual_monitor"]["state"], "awaiting_confirmation")
 
+    async def test_chain_claim_maps_legacy_unknown_history_to_in_progress(self):
+        execution = await self.manager.create(
+            "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
+            execution_mode="chain_visual_monitor",
+        )
+        started = await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+            patch={"state": "ready"}, event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"],
+            camera_id="camera-1", sequence=1,
+        )
+        await self.manager.apply_chain_visual_result(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+            latest={
+                "status": "unknown", "description_zh": "旧版本看不清",
+                "step_updates": [{
+                    "step_id": started["steps"][0]["step_id"],
+                    "status": "unknown", "description_zh": "目标物被遮挡",
+                }],
+                "sequence": 1,
+            },
+        )
+        reclaimed = await self.manager.claim_visual_monitor("camera-1")
+        self.assertEqual(reclaimed["previous_status"], "in_progress")
+        self.assertEqual(reclaimed["unfinished_steps"][0]["status"], "in_progress")
+        self.assertEqual(reclaimed["unfinished_steps"][0]["description_zh"], "目标物被遮挡")
+
     async def test_chain_pipeline_telemetry_is_visible_and_rejects_stale_sequence(self):
         execution = await self.manager.create(
             "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,

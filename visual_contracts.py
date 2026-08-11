@@ -17,8 +17,6 @@ class ActionVisualContract:
     succeeded: tuple[str, ...]
     in_progress: tuple[str, ...]
     failed: tuple[str, ...]
-    unknown: tuple[str, ...]
-    cautions: tuple[str, ...]
 
     @property
     def key(self) -> tuple[str, int]:
@@ -33,7 +31,7 @@ PICK_CONTRACT = ActionVisualContract(
     action_id="A_001",
     logic=0,
     name="Pick / 拿起",
-    version=1,
+    version=2,
     required_slots=("obj_a",),
     succeeded=(
         "能确认拿起的是指定 obj_a。",
@@ -44,17 +42,12 @@ PICK_CONTRACT = ActionVisualContract(
         "手正在接近、抓握或开始抬起，但尚未明确离开支撑面。",
         "抓空、滑落或掉落后仍在重新尝试。",
         "窗口中曾拿起目标物，但在 NOW 画面中已经放回原支撑面。",
+        "因遮挡、画质或物体身份不明确而无法确认是否拿起指定 obj_a；description_zh 必须说明具体不确定原因。",
+        "不得因为某个物体正在被手操作，就自动把它称为指定 obj_a。",
     ),
     failed=(
         "明确拿起了错误物体，而指定目标物仍留在原处。",
         "存在其他直接可见、且本次操作已经失败的事实。",
-    ),
-    unknown=(
-        "目标物身份、底部、支撑面或握持关系被遮挡，无法可靠判断。",
-    ),
-    cautions=(
-        "手靠近、手合拢或动作停止都不等于成功。",
-        "看不见目标物离开支撑面的证据时不能猜测成功。",
     ),
 )
 
@@ -63,7 +56,7 @@ CARRY_CONTRACT = ActionVisualContract(
     action_id="A_003",
     logic=0,
     name="Carry / 搬运",
-    version=1,
+    version=2,
     required_slots=("obj_a",),
     succeeded=(
         "能确认搬运的是指定 obj_a。",
@@ -74,19 +67,11 @@ CARRY_CONTRACT = ActionVisualContract(
     in_progress=(
         "目标物仍被拿着，但尚未看到足够明确的位移。",
         "正在调整握姿，或暂时滑落后仍在重新抓取、继续移动。",
+        "无法确认手中物体是不是指定 obj_a，或遮挡导致无法确认握持和位移；description_zh 必须说明具体不确定原因。",
+        "移动慢、暂时停止、方向不明确、目标区域不可见或移动距离较短，都属于 in_progress。",
     ),
     failed=(
         "仅在明确搬运了错误物体、而指定 obj_a 没有被搬运时判失败。",
-    ),
-    unknown=(
-        "无法确认手中物体是不是指定 obj_a。",
-        "遮挡导致无法确认是否仍被握持，或相机运动导致无法判断物体位移。",
-    ),
-    cautions=(
-        "这是宽松成功、极窄失败的中间步骤。",
-        "移动慢、暂时停止、方向不明确、目标区域不可见或移动距离较短都不得判 failed。",
-        "以上情况应返回 in_progress；只有关键视觉证据不可见时返回 unknown。",
-        "不能把相机自身运动误当成目标物移动。",
     ),
 )
 
@@ -95,7 +80,7 @@ PLACE_ON_SURFACE_CONTRACT = ActionVisualContract(
     action_id="A_002",
     logic=1,
     name="Place on surface / 放到表面",
-    version=1,
+    version=2,
     required_slots=("obj_a", "sur_a"),
     succeeded=(
         "能确认物体是指定 obj_a，目标表面是指定 sur_a。",
@@ -107,19 +92,12 @@ PLACE_ON_SURFACE_CONTRACT = ActionVisualContract(
         "目标物仍被手持，正在下降、对准或调整放置位置。",
         "目标物接触表面但手尚未释放，或放置不稳但仍在调整。",
         "掉落后仍在重新拿起并继续放置。",
+        "因遮挡、画质、物体身份或表面身份不明确而无法确认放置结果；description_zh 必须说明具体不确定原因。",
     ),
     failed=(
         "明确把指定物体放到了错误表面。",
         "明确放置了错误物体。",
         "目标物掉落到指定表面以外，且当前视频明确表明本次操作已经失败。",
-    ),
-    unknown=(
-        "物体与表面的接触区域被遮挡。",
-        "无法确认物体是否由指定表面承托、手是否释放，或目标表面身份不明确。",
-    ),
-    cautions=(
-        "仅凭手松开、动作停止或物体接近表面不能判成功。",
-        "成功必须同时满足指定表面承托、解除手部主要支撑和稳定留置。",
     ),
 )
 
@@ -173,10 +151,11 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 上一次状态：{assignment.get('previous_status') or '无'}（只作为时序参考，本次仍以直接可见证据为准）
 
 公共状态规则：
-- in_progress：操作尚未完成，但仍在执行、调整或仍有机会继续完成。可恢复的抓空、滑脱或掉落后继续尝试也属于 in_progress。
+- in_progress：操作尚未完成，或者因遮挡、画质、物体身份等原因暂时无法确认；description_zh 必须写明具体原因。可恢复的抓空、滑脱或掉落后继续尝试也属于 in_progress。
 - succeeded：本动作契约列出的成功后置条件在窗口结尾 NOW 画面中仍然明确成立。窗口中途曾经满足、但结尾已不满足，不能判为 succeeded。
 - failed：根据当前直接可见事实，本次原子操作已经失败。只有 failed 才填写自然语言 failure_reason，原因不使用预定义枚举。
-- unknown：关键区域遮挡、画质不足或证据不足，无法可靠判断。不能猜测。
+- 在判断动作状态前先核对实际被操作物体是否为指定 obj_a。不得因为某个物体正在被手操作、位于画面中央或最显眼，就自动把它称为 obj_a。
+- 能确认实际操作物不是 obj_a 时返回 failed；无法确认物体身份时返回 in_progress，并说明不确定原因。
 
 本动作 succeeded 判据：
 {_bullets(contract.succeeded)}
@@ -186,12 +165,6 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 
 本动作 failed 边界：
 {_bullets(contract.failed)}
-
-本动作 unknown 边界：
-{_bullets(contract.unknown)}
-
-本动作防误判规则：
-{_bullets(contract.cautions)}
 
 输出规则：
 - evidence 只写直接可见事实，不写隐藏推理、操作意图或控制建议。
@@ -226,10 +199,10 @@ def build_chain_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str
 参数：{slot_text}
 succeeded 判据：
 {_bullets(contract.succeeded)}
+in_progress 判据：
+{_bullets(contract.in_progress)}
 failed 边界：
-{_bullets(contract.failed)}
-防误判：
-{_bullets(contract.cautions)}""")
+{_bullets(contract.failed)}""")
 
     ledger = assignment.get("confirmed_steps") or []
     current_index = int(assignment.get("current_step_index", 0))
@@ -238,11 +211,11 @@ failed 边界：
         f"{item['step_id']}=succeeded" for item in ledger
     ) or "无"
     unfinished = assignment.get("unfinished_steps") or [
-        {"step_id": step["step_id"], "status": "unknown", "description_zh": None}
+        {"step_id": step["step_id"], "status": "in_progress", "description_zh": None}
         for step in steps[current_index:]
     ]
     unfinished_text = "\n".join(
-        f"- {item['step_id']}: 上一窗口状态={item.get('status') or 'unknown'}；"
+        f"- {item['step_id']}: 上一窗口状态={item.get('status') or 'in_progress'}；"
         f"观察={item.get('description_zh') or '尚无上一窗口观察'}"
         for item in unfinished
     )
@@ -261,15 +234,16 @@ failed 边界：
 
 时序与状态规则：
 - 只评估尚未由后端确认的步骤。step_updates 必须从当前步骤开始，按顺序返回未确认后缀 {pending_ids} 的连续前缀。
-- 一旦遇到第一个 in_progress、failed 或 unknown 就停止输出，不要再为更后面的尚未执行步骤生成占位结果。只有前面的步骤都 succeeded 才能继续输出下一步。
+- 一旦遇到第一个 in_progress 或 failed 就停止输出，不要再为更后面的尚未执行步骤生成占位结果。只有前面的步骤都 succeeded 才能继续输出下一步。
 - 不得重复输出已确认步骤，也不得跳步、自行重新拆解、改名或重排步骤。
 - 上一窗口摘要不是本窗口的视觉证据，不能直接复制为 evidence；必须结合本次 WINDOW 和 NOW 更新判断。
 - succeeded：视频中有直接证据表明该步骤完成。中间步骤只需在窗口内真实发生过，不要求其后置条件保持到 NOW；例如 Pick 后继续 Carry/Place，Pick 仍可 succeeded。
 - 最后一个步骤以及代表整个任务完成的状态必须在窗口结尾 NOW 仍明确成立；中途成立但 NOW 已撤销，不能判最终成功。
-- in_progress：该步骤正在执行或仍有机会完成；可恢复的抓空、滑脱、掉落后继续尝试属于 in_progress。
-- 如果画面和目标物清晰可见，但当前窗口尚未开始相关动作或目标物仍保持初始状态，返回 in_progress，而不是 unknown。
+- in_progress：该步骤正在执行、尚未完成，或者因遮挡、画质、物体身份等原因暂时无法确认；description_zh 必须写明具体原因。可恢复的抓空、滑脱、掉落后继续尝试属于 in_progress。
+- 如果画面和目标物清晰可见，但当前窗口尚未开始相关动作或目标物仍保持初始状态，返回 in_progress。
 - failed：直接可见该步骤已失败；只有 failed 填自然语言 failure_reason，不使用预定义枚举。
-- unknown：遮挡、画质或证据不足，不能可靠判断；不能猜测。
+- 在判断动作状态前先核对实际被操作物体是否为指定 obj_a。不得因为某个物体正在被手操作、位于画面中央或最显眼，就自动把它称为 obj_a。
+- 能确认实际操作物不是 obj_a 时返回 failed；无法确认物体身份时返回 in_progress，并说明不确定原因。
 - 后续步骤不能绕过尚未 succeeded 的前序步骤；若当前步骤 failed，立即在该步骤停止 step_updates。
 - 不能仅凭手靠近、动作停止、夹爪闭合或短暂接触推断成功。
 
@@ -281,6 +255,6 @@ failed 边界：
 - 最后步骤 succeeded 的 completion_evidence_timestamp_s 必须在最后 1 秒（5 到 6 秒），并对应 NOW 中仍成立的最终状态。
 - 只有 succeeded 填 completion_evidence_timestamp_s；其他状态必须为 null。
 - 只有 failed 填 failure_reason；其他状态必须为 null。
-- 顶层 status 概括整条任务：全部步骤 succeeded 才是 succeeded；出现 failed 是 failed；否则按当前可判断程度返回 in_progress 或 unknown。
+- 顶层 status 概括整条任务：全部步骤 succeeded 才是 succeeded；出现 failed 是 failed；其他情况都是 in_progress。
 - 只有顶层 succeeded 才填写 task_completion_evidence_timestamp_s，且必须在最后 1 秒；其他状态必须为 null。
 - 只返回符合 JSON Schema 的 JSON。"""

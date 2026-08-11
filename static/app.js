@@ -440,7 +440,7 @@ function monitorControls() {
         ? chainLatest?.step_updates?.find((item) => item.step_id === step.step_id) || chainLatest
         : chainLatest;
       const statusLabel = {
-        in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "无法判断",
+        in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "执行中",
       }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
       const evidence = latest?.completion_evidence_url
         ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
