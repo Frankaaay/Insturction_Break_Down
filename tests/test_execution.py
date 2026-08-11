@@ -90,6 +90,75 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         execution = await self.manager.create("把水壶放到桌子上", "test", None, STEPS)
         return await self.manager.start(execution["execution_id"])
 
+    async def test_chain_visual_monitor_advances_multiple_steps_without_new_session(self):
+        execution = await self.manager.create(
+            "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
+            execution_mode="chain_visual_monitor",
+        )
+        started = await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1", "qwen3.7-plus")
+        self.assertEqual(assignment["monitor_scope"], "chain")
+        self.assertEqual(len(assignment["steps"]), 3)
+        session_id = assignment["attempt_id"]
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=session_id, camera_id="camera-1",
+            patch={"state": "ready"}, event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=session_id, camera_id="camera-1", sequence=1,
+        )
+        updates = [
+            {"step_id": started["steps"][0]["step_id"], "status": "succeeded", "description_zh": "已拿起"},
+            {"step_id": started["steps"][1]["step_id"], "status": "succeeded", "description_zh": "已搬运"},
+            {"step_id": started["steps"][2]["step_id"], "status": "in_progress", "description_zh": "尚未放稳"},
+        ]
+        snapshot = await self.manager.apply_chain_visual_result(
+            execution["execution_id"], attempt_id=session_id, camera_id="camera-1",
+            latest={"status": "in_progress", "description_zh": "前两步完成", "step_updates": updates, "sequence": 1},
+        )
+        self.assertEqual([step["status"] for step in snapshot["steps"]], ["succeeded", "succeeded", "active"])
+        self.assertEqual(snapshot["current_step_index"], 2)
+        reclaimed = await self.manager.claim_visual_monitor("camera-1", "qwen3.7-plus")
+        self.assertEqual(reclaimed["attempt_id"], session_id)
+        self.assertEqual(reclaimed["monitor_state"], "observing")
+        self.assertEqual(reclaimed["current_step_index"], 2)
+        self.assertEqual(reclaimed["confirmed_steps"], [
+            {"step_id": started["steps"][0]["step_id"], "status": "succeeded"},
+            {"step_id": started["steps"][1]["step_id"], "status": "succeeded"},
+        ])
+        self.assertEqual(reclaimed["unfinished_steps"], [{
+            "step_id": started["steps"][2]["step_id"],
+            "status": "in_progress",
+            "description_zh": "尚未放稳",
+        }])
+
+    async def test_chain_visual_monitor_failure_stays_on_first_wrong_step(self):
+        execution = await self.manager.create(
+            "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,
+            execution_mode="chain_visual_monitor",
+        )
+        started = await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-1")
+        await self.manager.update_visual_monitor(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+            patch={"state": "ready"}, event_type="visual_monitor.baseline.ready",
+        )
+        await self.manager.begin_visual_checkpoint(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1", sequence=1,
+        )
+        updates = [
+            {"step_id": started["steps"][0]["step_id"], "status": "failed", "description_zh": "拿起了手机", "failure_reason": "拿错物体"},
+            {"step_id": started["steps"][1]["step_id"], "status": "unknown", "description_zh": "前序失败"},
+            {"step_id": started["steps"][2]["step_id"], "status": "unknown", "description_zh": "前序失败"},
+        ]
+        snapshot = await self.manager.apply_chain_visual_result(
+            execution["execution_id"], attempt_id=assignment["attempt_id"], camera_id="camera-1",
+            latest={"status": "failed", "description_zh": "第一步拿错物体", "step_updates": updates, "sequence": 1},
+        )
+        self.assertEqual(snapshot["current_step_index"], 0)
+        self.assertEqual(snapshot["steps"][0]["status"], "active")
+        self.assertEqual(snapshot["chain_visual_monitor"]["state"], "awaiting_confirmation")
+
     async def test_visual_failure_observation_waits_for_confirmation(self):
         execution = await self.manager.create(
             "拿起水壶", "test", None, STEPS[:1], execution_mode="visual_monitor"

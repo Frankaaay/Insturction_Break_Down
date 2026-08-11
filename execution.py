@@ -29,6 +29,7 @@ class ExecutionConflictError(RuntimeError):
 
 
 WORKFLOW_NODE_TYPES = {"command", "service", "motion"}
+EXECUTION_MODES = {"robot_agent", "visual_monitor", "chain_visual_monitor"}
 
 
 class SQLiteExecutionStore:
@@ -177,7 +178,7 @@ class ExecutionManager:
         planner_steps: list[dict[str, Any]],
         execution_mode: str = "robot_agent",
     ) -> dict[str, Any]:
-        if execution_mode not in {"robot_agent", "visual_monitor"}:
+        if execution_mode not in EXECUTION_MODES:
             raise ExecutionConflictError("不支持的执行模式")
         execution_id = str(uuid4())
         created_at = _iso()
@@ -220,7 +221,7 @@ class ExecutionManager:
         return self._snapshot_locked(execution)
 
     async def set_mode(self, execution_id: str, mode: str) -> dict[str, Any]:
-        if mode not in {"robot_agent", "visual_monitor"}:
+        if mode not in EXECUTION_MODES:
             raise ExecutionConflictError("不支持的执行模式")
         execution = self._require(execution_id)
         async with self._locks[execution_id]:
@@ -230,19 +231,76 @@ class ExecutionManager:
             self._record_event_locked(execution, "execution.mode.changed", {"mode": mode})
             return self._snapshot_locked(execution)
 
-    async def claim_visual_monitor(self, camera_id: str) -> dict[str, Any] | None:
+    async def claim_visual_monitor(
+        self, camera_id: str, model_requested: str | None = None,
+    ) -> dict[str, Any] | None:
         """Claim the oldest active attempt with a registered visual contract."""
         for execution_id in list(self._executions):
             execution = self._executions[execution_id]
             async with self._locks[execution_id]:
                 attempt = execution.get("active_attempt")
+                mode = execution.get("execution_mode", "robot_agent")
                 if (
                     execution["state"] != "running"
-                    or execution.get("execution_mode", "robot_agent") != "visual_monitor"
+                    or mode not in {"visual_monitor", "chain_visual_monitor"}
                     or not attempt
                     or attempt["status"] != "waiting"
                 ):
                     continue
+                if mode == "chain_visual_monitor":
+                    if not all(supports_visual_contract(step.get("action_id"), step.get("logic")) for step in execution["steps"]):
+                        continue
+                    monitor = execution.get("chain_visual_monitor")
+                    if monitor and monitor.get("camera_id") != camera_id:
+                        continue
+                    if not monitor:
+                        monitor = {
+                            "monitor_session_id": str(uuid4()),
+                            "camera_id": camera_id,
+                            "state": "awaiting_baseline",
+                            "monitor_epoch": 1,
+                            "latest": None,
+                            "baseline_url": None,
+                            "claimed_at": _iso(),
+                            "model_requested": model_requested,
+                        }
+                        execution["chain_visual_monitor"] = monitor
+                        self._record_event_locked(execution, "chain_visual_monitor.claimed", {
+                            "camera_id": camera_id,
+                            "monitor_session_id": monitor["monitor_session_id"],
+                        })
+                    elif model_requested and not monitor.get("model_requested"):
+                        monitor["model_requested"] = model_requested
+                    public_steps = [{
+                        key: copy.deepcopy(step.get(key))
+                        for key in ("step_id", "index", "action_id", "action", "logic", "slots", "zh", "en")
+                    } for step in execution["steps"]]
+                    previous_by_step = {
+                        item.get("step_id"): item
+                        for item in (monitor.get("latest") or {}).get("step_updates", [])
+                    }
+                    current_index = execution["current_step_index"]
+                    return {
+                        "execution_id": execution_id,
+                        "attempt_id": monitor["monitor_session_id"],
+                        "monitor_scope": "chain",
+                        "instruction": execution["instruction"],
+                        "steps": public_steps,
+                        "confirmed_steps": [
+                            {"step_id": step["step_id"], "status": "succeeded"}
+                            for step in execution["steps"] if step["status"] == "succeeded"
+                        ],
+                        "current_step_index": current_index,
+                        "unfinished_steps": [{
+                            "step_id": step["step_id"],
+                            "status": (previous_by_step.get(step["step_id"]) or {}).get("status", "unknown"),
+                            "description_zh": (previous_by_step.get(step["step_id"]) or {}).get("description_zh"),
+                        } for step in execution["steps"][current_index:]],
+                        "previous_status": (monitor.get("latest") or {}).get("status"),
+                        "monitor_state": monitor.get("state"),
+                        "monitor_epoch": monitor.get("monitor_epoch", 1),
+                        "model_requested": monitor.get("model_requested"),
+                    }
                 step = self._current_step_locked(execution)
                 if not supports_visual_contract(step.get("action_id"), step.get("logic")):
                     continue
@@ -258,6 +316,7 @@ class ExecutionManager:
                         "latest": None,
                         "baseline_url": None,
                         "claimed_at": _iso(),
+                        "model_requested": model_requested,
                         **contract_meta,
                     }
                     self._record_event_locked(execution, "visual_monitor.claimed", {
@@ -291,6 +350,10 @@ class ExecutionManager:
     ) -> dict[str, Any]:
         """Atomically reserve the one allowed inference slot for an attempt."""
         execution = self._require(execution_id)
+        if execution.get("execution_mode") == "chain_visual_monitor":
+            return await self._begin_chain_visual_checkpoint(
+                execution_id, monitor_session_id=attempt_id, camera_id=camera_id, sequence=sequence,
+            )
         async with self._locks[execution_id]:
             attempt = execution.get("active_attempt")
             if (
@@ -329,6 +392,8 @@ class ExecutionManager:
     ) -> dict[str, Any]:
         """Discard a terminal VLM observation and start a fresh observation epoch."""
         execution = self._require(execution_id)
+        if execution.get("execution_mode") == "chain_visual_monitor":
+            return await self._resume_chain_visual_monitor(execution_id, monitor_session_id=attempt_id)
         async with self._locks[execution_id]:
             attempt = execution.get("active_attempt")
             if (
@@ -372,6 +437,11 @@ class ExecutionManager:
         event_type: str,
     ) -> dict[str, Any]:
         execution = self._require(execution_id)
+        if execution.get("execution_mode") == "chain_visual_monitor":
+            return await self._update_chain_visual_monitor(
+                execution_id, monitor_session_id=attempt_id, camera_id=camera_id,
+                patch=patch, event_type=event_type,
+            )
         async with self._locks[execution_id]:
             attempt = execution.get("active_attempt")
             if (
@@ -454,6 +524,137 @@ class ExecutionManager:
             )
             return self._snapshot_locked(execution)
 
+    async def _begin_chain_visual_checkpoint(
+        self, execution_id: str, *, monitor_session_id: str, camera_id: str, sequence: int,
+    ) -> dict[str, Any]:
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            monitor = execution.get("chain_visual_monitor") or {}
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "chain_visual_monitor"
+                or monitor.get("monitor_session_id") != monitor_session_id
+                or monitor.get("camera_id") != camera_id
+            ):
+                raise ExecutionConflictError("整链 Visual Monitor session 已过期")
+            if monitor.get("state") == "awaiting_confirmation":
+                raise ExecutionConflictError("整链 Visual Monitor 正在等待人工确认")
+            if monitor.get("state") == "inferencing":
+                raise ExecutionConflictError("整链 Visual Monitor 当前已有推理请求")
+            if monitor.get("state") == "awaiting_baseline":
+                raise ExecutionConflictError("请先上传整链 BEFORE baseline")
+            monitor["state"] = "inferencing"
+            monitor["active_sequence"] = sequence
+            self._record_event_locked(execution, "chain_visual_monitor.inference.started", {
+                "camera_id": camera_id, "sequence": sequence,
+                "monitor_session_id": monitor_session_id,
+            })
+            return self._snapshot_locked(execution)
+
+    async def _update_chain_visual_monitor(
+        self, execution_id: str, *, monitor_session_id: str, camera_id: str,
+        patch: dict[str, Any], event_type: str,
+    ) -> dict[str, Any]:
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            monitor = execution.get("chain_visual_monitor") or {}
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "chain_visual_monitor"
+                or monitor.get("monitor_session_id") != monitor_session_id
+                or monitor.get("camera_id") != camera_id
+            ):
+                raise ExecutionConflictError("整链 Visual Monitor session 已过期")
+            if event_type.endswith("baseline.ready") and monitor.get("state") != "awaiting_baseline":
+                raise ExecutionConflictError("当前不接受新的整链 BEFORE baseline")
+            if event_type in {"visual_monitor.observation", "visual_monitor.error"} and monitor.get("state") != "inferencing":
+                raise ExecutionConflictError("整链 Visual Monitor 推理结果已过期")
+            monitor.update(copy.deepcopy(patch))
+            self._record_event_locked(execution, event_type.replace("visual_monitor", "chain_visual_monitor", 1), {
+                "camera_id": camera_id,
+                "status": (patch.get("latest") or {}).get("status"),
+            })
+            return self._snapshot_locked(execution)
+
+    async def _resume_chain_visual_monitor(
+        self, execution_id: str, *, monitor_session_id: str,
+    ) -> dict[str, Any]:
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            monitor = execution.get("chain_visual_monitor") or {}
+            if (
+                execution["state"] != "running"
+                or monitor.get("monitor_session_id") != monitor_session_id
+                or monitor.get("state") != "awaiting_confirmation"
+            ):
+                raise ExecutionConflictError("当前没有等待确认的整链视觉终态")
+            monitor.update({"state": "observing", "active_sequence": None})
+            self._record_event_locked(execution, "chain_visual_monitor.resumed", {
+                "monitor_session_id": monitor_session_id,
+            })
+            return self._snapshot_locked(execution)
+
+    async def apply_chain_visual_result(
+        self, execution_id: str, *, attempt_id: str, camera_id: str, latest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge one chain observation without allowing skips, regressions or stale writes."""
+        execution = self._require(execution_id)
+        async with self._locks[execution_id]:
+            monitor = execution.get("chain_visual_monitor") or {}
+            if (
+                execution["state"] != "running"
+                or execution.get("execution_mode") != "chain_visual_monitor"
+                or monitor.get("monitor_session_id") != attempt_id
+                or monitor.get("camera_id") != camera_id
+                or monitor.get("state") != "inferencing"
+                or monitor.get("active_sequence") != latest.get("sequence")
+            ):
+                raise ExecutionConflictError("整链 Visual Monitor 结果已过期")
+            updates = latest.get("step_updates") or []
+            current = execution["current_step_index"]
+            if current is None:
+                raise ExecutionConflictError("会话当前没有步骤")
+            expected_ids = [step["step_id"] for step in execution["steps"][current:]]
+            if [item.get("step_id") for item in updates] != expected_ids:
+                raise ExecutionConflictError("整链结果与当前规划不匹配")
+            for index in range(current):
+                if execution["steps"][index]["status"] != "succeeded":
+                    raise ExecutionConflictError("整链步骤账本不连续")
+
+            monitor.update({"latest": copy.deepcopy(latest), "active_sequence": None})
+            self._record_event_locked(execution, "chain_visual_monitor.observation", {
+                "camera_id": camera_id, "status": latest.get("status"),
+                "sequence": latest.get("sequence"),
+            })
+            while execution["state"] == "running" and execution["current_step_index"] is not None:
+                index = execution["current_step_index"]
+                update = updates[index - current]
+                if update["status"] != "succeeded":
+                    break
+                attempt = execution.get("active_attempt")
+                if not attempt or attempt.get("status") != "waiting":
+                    raise ExecutionConflictError("当前步骤没有可完成的 attempt")
+                attempt["chain_visual_observation"] = copy.deepcopy(update)
+                self._cancel_timer_locked(execution_id)
+                self._resolve_attempt_locked(
+                    execution, outcome="success", source="visual_monitor",
+                    detail=update.get("description_zh"), cancel_timer=False,
+                )
+            if execution["state"] == "completed":
+                monitor["state"] = "succeeded"
+            else:
+                active_update = updates[execution["current_step_index"] - current]
+                monitor["state"] = "awaiting_confirmation" if active_update["status"] == "failed" else "observing"
+                if monitor["state"] == "awaiting_confirmation":
+                    self._cancel_timer_locked(execution_id)
+            self._record_event_locked(execution, "chain_visual_monitor.merged", {
+                "camera_id": camera_id,
+                "state": monitor["state"],
+                "current_step_index": execution.get("current_step_index"),
+                "sequence": latest.get("sequence"),
+            })
+            return self._snapshot_locked(execution)
+
     async def get(self, execution_id: str) -> dict[str, Any]:
         execution = self._require(execution_id)
         async with self._locks[execution_id]:
@@ -477,7 +678,17 @@ class ExecutionManager:
                         workflow["run_id"],
                     )
                     continue
-                if execution.get("execution_mode") == "visual_monitor":
+                if execution.get("execution_mode") == "chain_visual_monitor":
+                    monitor = execution.get("chain_visual_monitor") or {}
+                    if monitor.get("state") == "awaiting_confirmation":
+                        continue
+                    if monitor.get("state") == "inferencing":
+                        monitor.update({"state": "error", "active_sequence": None})
+                        self._record_event_locked(execution, "chain_visual_monitor.error", {
+                            "camera_id": monitor.get("camera_id"),
+                            "detail": "server restarted during inference",
+                        })
+                elif execution.get("execution_mode") == "visual_monitor":
                     monitor = attempt.get("visual_monitor") or {}
                     if monitor.get("state") == "awaiting_confirmation":
                         # Human confirmation intentionally has no automatic timeout.
@@ -495,7 +706,7 @@ class ExecutionManager:
                 step = self._current_step_locked(execution)
                 timeout_seconds = (
                     float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120"))
-                    if execution.get("execution_mode") == "visual_monitor"
+                    if execution.get("execution_mode") in {"visual_monitor", "chain_visual_monitor"}
                     else self.pick_claim_timeout_seconds
                     if step.get("action_id") == "A_001"
                     else execution["timeout_seconds"]
@@ -1069,6 +1280,15 @@ class ExecutionManager:
             if step["status"] != "blocked":
                 raise ExecutionConflictError("当前步骤没有处于 blocked 状态")
             execution["state"] = "running"
+            if execution.get("execution_mode") == "chain_visual_monitor":
+                monitor = execution.get("chain_visual_monitor") or {}
+                monitor.update({
+                    "state": "awaiting_baseline",
+                    "monitor_epoch": int(monitor.get("monitor_epoch", 1)) + 1,
+                    "active_sequence": None,
+                    "baseline_url": None,
+                    "baseline_captured_at": None,
+                })
             self._record_event_locked(execution, "execution.resumed", {
                 "step_id": step["step_id"],
                 "reason": "manual_retry",
@@ -1174,7 +1394,7 @@ class ExecutionManager:
         step["status"] = "active"
         started = _now()
         is_pick = step.get("action_id") == "A_001"
-        visual_mode = execution.get("execution_mode") == "visual_monitor"
+        visual_mode = execution.get("execution_mode") in {"visual_monitor", "chain_visual_monitor"}
         visual_timeout = float(os.getenv("VISUAL_MONITOR_ATTEMPT_TIMEOUT_SECONDS", "120"))
         timeout_seconds = (
             visual_timeout if visual_mode

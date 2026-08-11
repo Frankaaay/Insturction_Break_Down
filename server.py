@@ -49,9 +49,14 @@ async def _complete_visual_execution(**kwargs):
     return await execution_manager.complete_visual_success(**kwargs)
 
 
+async def _apply_chain_visual_execution(**kwargs):
+    return await execution_manager.apply_chain_visual_result(**kwargs)
+
+
 visual_monitor = VisualMonitorService(
     _update_visual_execution,
     success_callback=_complete_visual_execution,
+    chain_result_callback=_apply_chain_visual_execution,
 )
 visual_baselines: dict[tuple[str, str, str], Path] = {}
 live_preview_hub = LivePreviewHub()
@@ -79,7 +84,7 @@ class DecomposeRequest(BaseModel):
 
 
 class ExecutionModeRequest(BaseModel):
-    mode: Literal["robot_agent", "visual_monitor"]
+    mode: Literal["robot_agent", "visual_monitor", "chain_visual_monitor"]
 
 
 class VisualClaimRequest(BaseModel):
@@ -414,7 +419,9 @@ async def claim_visual_monitor(
     authorization: str | None = Header(default=None),
 ) -> dict:
     _require_visual_monitor(authorization)
-    return {"assignment": await execution_manager.claim_visual_monitor(req.camera_id)}
+    return {"assignment": await execution_manager.claim_visual_monitor(
+        req.camera_id, model_requested=visual_monitor.config.model,
+    )}
 
 
 @app.websocket("/api/visual-monitor/live/ingest/{camera_id}")

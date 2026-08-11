@@ -136,10 +136,24 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
-        self.assertIn("/app.js?v=visual-monitor-20260807", index)
+        self.assertIn("/app.js?v=chain-visual-monitor-20260811", index)
         script = (await self.client.get("/app.js")).text
         self.assertNotIn("人工确认成功", script)
         self.assertIn("VLM 判定成功后将自动进入下一步骤", script)
+        self.assertIn("mode-chain_visual_monitor", script)
+        self.assertIn("live-preview-model", script)
+
+    async def test_chain_visual_monitor_mode_is_selectable_before_start(self):
+        with patch("server.decompose", return_value=PLANNER_RESULT):
+            execution = (await self.client.post("/api/executions", json={
+                "instruction": "拿起杯子", "provider": "deepseek",
+            })).json()["execution"]
+        response = await self.client.post(
+            f"/api/executions/{execution['execution_id']}/mode",
+            json={"mode": "chain_visual_monitor"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["execution"]["execution_mode"], "chain_visual_monitor")
 
     async def test_visual_monitor_upload_updates_snapshot_without_advancing(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):

@@ -45,6 +45,11 @@ class RealSenseClientTests(unittest.TestCase):
         resumed = {"execution_id": "execution-1", "attempt_id": "attempt-1", "monitor_epoch": 2}
         self.assertNotEqual(assignment_identity(first), assignment_identity(resumed))
 
+    def test_chain_step_progress_does_not_reset_capture_generation(self):
+        first = {"execution_id": "execution-1", "attempt_id": "chain-session", "monitor_epoch": 1, "current_step_index": 0}
+        advanced = {"execution_id": "execution-1", "attempt_id": "chain-session", "monitor_epoch": 1, "current_step_index": 2}
+        self.assertEqual(assignment_identity(first), assignment_identity(advanced))
+
     def test_terminal_observation_pauses_uploads_only_while_awaiting_confirmation(self):
         self.assertTrue(uploads_paused({"monitor_state": "awaiting_confirmation"}))
         self.assertFalse(uploads_paused({"monitor_state": "inferencing"}))

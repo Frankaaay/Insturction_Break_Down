@@ -44,6 +44,13 @@ const EVENT_LABELS = {
   "visual_monitor.error": "VLM 请求失败",
   "visual_monitor.inference.started": "VLM 推理已开始",
   "visual_monitor.resumed": "继续视觉监控",
+  "chain_visual_monitor.claimed": "整链视觉采集端已连接",
+  "chain_visual_monitor.baseline.ready": "整链视觉初始帧已就绪",
+  "chain_visual_monitor.observation": "VLM 返回整链观察",
+  "chain_visual_monitor.error": "整链 VLM 请求失败",
+  "chain_visual_monitor.inference.started": "整链 VLM 推理已开始",
+  "chain_visual_monitor.resumed": "继续整链视觉监控",
+  "chain_visual_monitor.merged": "整链步骤状态已合并",
 };
 
 function esc(value) {
@@ -57,8 +64,13 @@ function randomId() {
 }
 
 function desiredPreviewCamera() {
-  if (execution?.execution_mode !== "visual_monitor") return null;
-  return execution?.active_attempt?.visual_monitor?.camera_id || null;
+  if (execution?.execution_mode === "chain_visual_monitor") {
+    return execution?.chain_visual_monitor?.camera_id || null;
+  }
+  if (execution?.execution_mode === "visual_monitor") {
+    return execution?.active_attempt?.visual_monitor?.camera_id || null;
+  }
+  return null;
 }
 
 function setPreviewStatus(text, kind = "wait") {
@@ -331,7 +343,8 @@ function monitorControls() {
       <div class="monitor-sub">先选择执行链路，再开始当前原子操作。</div>
       <div class="mode-switch">
         <button data-action="mode-robot_agent" class="${mode === "robot_agent" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>机器人 Agent</button>
-        <button data-action="mode-visual_monitor" class="${mode === "visual_monitor" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>仅视觉 Monitor</button>
+        <button data-action="mode-visual_monitor" class="${mode === "visual_monitor" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>原子视觉</button>
+        <button data-action="mode-chain_visual_monitor" class="${mode === "chain_visual_monitor" ? "active" : ""}" ${commandBusy ? "disabled" : ""}>整链视觉</button>
       </div>
       <div class="monitor-buttons">
         <button class="control-btn primary" data-action="start" ${commandBusy ? "disabled" : ""}>开始执行</button>
@@ -359,9 +372,13 @@ function monitorControls() {
         </div>
         <div class="monitor-note">网页终止不是物理急停；异常运动必须使用现场急停。</div>`;
     }
-    const visual = attempt.visual_monitor;
-    if (execution.execution_mode === "visual_monitor") {
-      const latest = visual?.latest;
+    const chainMode = execution.execution_mode === "chain_visual_monitor";
+    const visual = chainMode ? execution.chain_visual_monitor : attempt.visual_monitor;
+    if (execution.execution_mode === "visual_monitor" || chainMode) {
+      const chainLatest = visual?.latest;
+      const latest = chainMode
+        ? chainLatest?.step_updates?.find((item) => item.step_id === step.step_id) || chainLatest
+        : chainLatest;
       const statusLabel = {
         in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "无法判断",
       }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
@@ -369,14 +386,18 @@ function monitorControls() {
         ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
       const timings = latest?.timings_ms;
       const awaitingConfirmation = visual?.state === "awaiting_confirmation";
+      const requestedModel = visual?.model_requested || latest?.model_requested || chainLatest?.model_requested;
+      const actualModel = chainLatest?.model_actual || latest?.model_actual;
+      const modelLabel = actualModel && requestedModel && actualModel !== requestedModel
+        ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel || "等待模型信息";
       const livePreview = visual?.camera_id
-        ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
+        ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span class="live-preview-model">${esc(modelLabel)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
         : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
-      return `<div class="monitor-kicker">Visual Monitor · Attempt ${attempt.attempt_no}</div>
+      return `<div class="monitor-kicker">${chainMode ? "Chain Visual Monitor" : "Visual Monitor"} · Attempt ${attempt.attempt_no}</div>
         ${livePreview}
         <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
         <div class="monitor-action">${esc(step.zh)}</div>
-        <div class="monitor-sub">${esc(latest?.description_zh || "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。")}</div>
+        <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "同一个 6 秒窗口会联合判断整条原子操作链，并可一次推进多个连续步骤。" : "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。"))}</div>
         ${latest?.failure_reason ? `<div class="visual-failure">${esc(latest.failure_reason)}</div>` : ""}
         ${evidence}
         ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}
@@ -385,7 +406,7 @@ function monitorControls() {
           ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}
           <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
         </div>
-        <div class="monitor-note">${awaitingConfirmation ? "VLM 判定失败，已暂停请求并等待人工确认。" : "VLM 判定成功后将自动进入下一步骤。"}</div>`;
+        <div class="monitor-note">${awaitingConfirmation ? "VLM 判定当前步骤失败，已暂停请求并等待人工确认。" : chainMode ? "中间步骤按视频内事件确认；最终步骤必须在 NOW 仍成立。" : "VLM 判定成功后将自动进入下一步骤。"}</div>`;
     }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>
@@ -582,7 +603,10 @@ function handleControl(action) {
   if (action === "resume-monitor") {
     const attempt = execution.active_attempt;
     if (!attempt) return;
-    return postControl("visual-monitor/resume", { attempt_id: attempt.attempt_id });
+    const monitorId = execution.execution_mode === "chain_visual_monitor"
+      ? execution.chain_visual_monitor?.monitor_session_id : attempt.attempt_id;
+    if (!monitorId) return;
+    return postControl("visual-monitor/resume", { attempt_id: monitorId });
   }
   if (action.startsWith("report-")) {
     const step = currentStep();

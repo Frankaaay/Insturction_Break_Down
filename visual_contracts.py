@@ -201,3 +201,83 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 - 非 failed 状态的 failure_reason 必须为 null。
 - 不决定继续、推进、停止或恢复；这些属于独立控制层。
 - 只返回符合 JSON Schema 的 JSON。"""
+
+
+def build_chain_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
+    """Build one prompt that evaluates the planner's complete, stable step chain."""
+    steps = assignment.get("steps") or []
+    if not steps:
+        raise ValueError("整链 Visual Monitor 缺少步骤")
+    rendered_steps: list[str] = []
+    for index, step in enumerate(steps, start=1):
+        action_id = step.get("action_id")
+        logic = step.get("logic")
+        contract = get_visual_contract(action_id, logic)
+        if not contract:
+            raise ValueError(f"没有 Visual Monitor 动作契约: {action_id}/logic{logic}")
+        slots = step.get("slots") or {}
+        missing = [name for name in contract.required_slots if not str(slots.get(name, "")).strip()]
+        if missing:
+            raise ValueError(f"动作契约缺少 slots: {', '.join(missing)}")
+        slot_text = "，".join(f"{name}={slots[name]}" for name in contract.required_slots)
+        rendered_steps.append(f"""步骤 {index} / step_id={step['step_id']}
+动作：{contract.name}（{contract.contract_key}，contract v{contract.version}）
+描述：{step.get('zh') or step.get('action') or contract.name}
+参数：{slot_text}
+succeeded 判据：
+{_bullets(contract.succeeded)}
+failed 边界：
+{_bullets(contract.failed)}
+防误判：
+{_bullets(contract.cautions)}""")
+
+    ledger = assignment.get("confirmed_steps") or []
+    current_index = int(assignment.get("current_step_index", 0))
+    pending_ids = [step["step_id"] for step in steps[current_index:]]
+    ledger_text = "、".join(
+        f"{item['step_id']}=succeeded" for item in ledger
+    ) or "无"
+    unfinished = assignment.get("unfinished_steps") or [
+        {"step_id": step["step_id"], "status": "unknown", "description_zh": None}
+        for step in steps[current_index:]
+    ]
+    unfinished_text = "\n".join(
+        f"- {item['step_id']}: 上一窗口状态={item.get('status') or 'unknown'}；"
+        f"观察={item.get('description_zh') or '尚无上一窗口观察'}"
+        for item in unfinished
+    )
+    return f"""你是实时视觉观察器。你要在同一个 6 秒视频窗口内评估完整操作链，而不是只判断当前一个原子动作。
+
+原始指令：{assignment.get('instruction') or '未提供'}
+检查点序号：{sequence}
+
+后端已经确认且不可回退的步骤：
+{ledger_text}
+
+当前及后续未完成步骤（上一窗口摘要只作为时序参考）：
+{unfinished_text}
+
+{chr(10).join(rendered_steps)}
+
+时序与状态规则：
+- 只评估尚未由后端确认的步骤。step_updates 必须按顺序返回这个未确认后缀：{pending_ids}。不得重复输出已确认步骤，也不得自行重新拆解、改名、增删或重排步骤。
+- 上一窗口摘要不是本窗口的视觉证据，不能直接复制为 evidence；必须结合本次 WINDOW 和 NOW 更新判断。
+- succeeded：视频中有直接证据表明该步骤完成。中间步骤只需在窗口内真实发生过，不要求其后置条件保持到 NOW；例如 Pick 后继续 Carry/Place，Pick 仍可 succeeded。
+- 最后一个步骤以及代表整个任务完成的状态必须在窗口结尾 NOW 仍明确成立；中途成立但 NOW 已撤销，不能判最终成功。
+- in_progress：该步骤正在执行或仍有机会完成；可恢复的抓空、滑脱、掉落后继续尝试属于 in_progress。
+- failed：直接可见该步骤已失败；只有 failed 填自然语言 failure_reason，不使用预定义枚举。
+- unknown：遮挡、画质或证据不足，不能可靠判断；不能猜测。
+- 后续步骤不能绕过尚未 succeeded 的前序步骤。若某一步 failed，后续步骤必须是 in_progress 或 unknown，不能 succeeded。
+- 不能仅凭手靠近、动作停止、夹爪闭合或短暂接触推断成功。
+
+输出规则：
+- step_updates 必须包含未确认后缀中的所有 step_id，每个恰好一次且顺序一致。
+- evidence 只写直接可见事实，不写隐藏推理、意图、控制建议或 decision。
+- 所有时间戳相对本次 6 秒 WINDOW 开头，范围 0 到 6 秒。
+- 中间步骤 succeeded 的 completion_evidence_timestamp_s 可位于窗口任意时刻。
+- 最后步骤 succeeded 的 completion_evidence_timestamp_s 必须在最后 1 秒（5 到 6 秒），并对应 NOW 中仍成立的最终状态。
+- 只有 succeeded 填 completion_evidence_timestamp_s；其他状态必须为 null。
+- 只有 failed 填 failure_reason；其他状态必须为 null。
+- 顶层 status 概括整条任务：全部步骤 succeeded 才是 succeeded；出现 failed 是 failed；否则按当前可判断程度返回 in_progress 或 unknown。
+- 只有顶层 succeeded 才填写 task_completion_evidence_timestamp_s，且必须在最后 1 秒；其他状态必须为 null。
+- 只返回符合 JSON Schema 的 JSON。"""
