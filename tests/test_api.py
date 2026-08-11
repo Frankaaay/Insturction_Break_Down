@@ -136,7 +136,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
-        self.assertIn("/app.js?v=three-state-monitor-20260811", index)
+        self.assertIn("/app.js?v=monitor-result-log-20260811", index)
         script = (await self.client.get("/app.js")).text
         self.assertNotIn("人工确认成功", script)
         self.assertIn("VLM 判定成功后将自动进入下一步骤", script)
@@ -145,6 +145,11 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pipeline-panel", script)
         self.assertIn("function patchExecution()", script)
         self.assertIn("oldPreview", script)
+        self.assertIn('["running", "completed"].includes(execution.state)', script)
+        self.assertIn("function visualEvents()", script)
+        self.assertIn("VLM 判断日志", script)
+        self.assertIn("成功证据", script)
+        self.assertNotIn('class="timing-grid"', script)
 
     async def test_chain_visual_monitor_mode_is_selectable_before_start(self):
         with patch("server.decompose", return_value=PLANNER_RESULT):

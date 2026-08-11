@@ -471,12 +471,15 @@ class ExecutionManager:
             monitor.update(copy.deepcopy(patch))
             if monitor.get("state") == "awaiting_confirmation":
                 self._cancel_timer_locked(execution_id)
-            self._record_event_locked(execution, event_type, {
+            event_data = {
                 "step_id": self._current_step_locked(execution)["step_id"],
                 "attempt_id": attempt_id,
                 "camera_id": camera_id,
                 "status": (patch.get("latest") or {}).get("status"),
-            })
+            }
+            if event_type in {"visual_monitor.observation", "visual_monitor.error"}:
+                event_data["observation"] = copy.deepcopy(patch.get("latest"))
+            self._record_event_locked(execution, event_type, event_data)
             return self._snapshot_locked(execution)
 
     async def update_visual_pipeline(
@@ -565,6 +568,7 @@ class ExecutionManager:
                 "camera_id": camera_id,
                 "status": "succeeded",
                 "auto_advance": True,
+                "observation": copy.deepcopy(latest),
             })
             self._cancel_timer_locked(execution_id)
             self._cancel_heartbeat_timer_locked(execution_id)
@@ -623,10 +627,17 @@ class ExecutionManager:
             if event_type in {"visual_monitor.observation", "visual_monitor.error"} and monitor.get("state") != "inferencing":
                 raise ExecutionConflictError("整链 Visual Monitor 推理结果已过期")
             monitor.update(copy.deepcopy(patch))
-            self._record_event_locked(execution, event_type.replace("visual_monitor", "chain_visual_monitor", 1), {
+            event_data = {
                 "camera_id": camera_id,
                 "status": (patch.get("latest") or {}).get("status"),
-            })
+            }
+            if event_type in {"visual_monitor.observation", "visual_monitor.error"}:
+                event_data["observation"] = copy.deepcopy(patch.get("latest"))
+            self._record_event_locked(
+                execution,
+                event_type.replace("visual_monitor", "chain_visual_monitor", 1),
+                event_data,
+            )
             return self._snapshot_locked(execution)
 
     async def _resume_chain_visual_monitor(
@@ -691,6 +702,7 @@ class ExecutionManager:
             self._record_event_locked(execution, "chain_visual_monitor.observation", {
                 "camera_id": camera_id, "status": latest.get("status"),
                 "sequence": latest.get("sequence"),
+                "observation": copy.deepcopy(latest),
             })
             while execution["state"] == "running" and execution["current_step_index"] is not None:
                 index = execution["current_step_index"]

@@ -117,6 +117,12 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
             latest={"status": "in_progress", "description_zh": "前两步完成", "step_updates": updates, "sequence": 1},
         )
         self.assertEqual([step["status"] for step in snapshot["steps"]], ["succeeded", "succeeded", "active"])
+        observation_event = next(
+            event for event in snapshot["events"]
+            if event["type"] == "chain_visual_monitor.observation"
+        )
+        self.assertEqual(observation_event["data"]["observation"]["description_zh"], "前两步完成")
+        self.assertEqual(len(observation_event["data"]["observation"]["step_updates"]), 3)
         self.assertEqual(snapshot["current_step_index"], 2)
         reclaimed = await self.manager.claim_visual_monitor("camera-1", "qwen3.7-plus")
         self.assertEqual(reclaimed["attempt_id"], session_id)

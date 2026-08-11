@@ -341,7 +341,9 @@ function currentVisualMonitor() {
   if (execution?.execution_mode === "chain_visual_monitor") {
     return execution.chain_visual_monitor || null;
   }
-  return execution?.active_attempt?.visual_monitor || null;
+  const step = currentStep();
+  const lastAttempt = step?.attempts?.[step.attempts.length - 1];
+  return execution?.active_attempt?.visual_monitor || lastAttempt?.visual_monitor || null;
 }
 
 function pipelineMarkup(visual, latest) {
@@ -395,6 +397,55 @@ function updatePipelineClock() {
 
 setInterval(updatePipelineClock, 100);
 
+function visualMonitorControls(step, attempt, chainMode, visual) {
+  const chainLatest = visual?.latest;
+  const latest = chainMode
+    ? chainLatest?.step_updates?.find((item) => item.step_id === step.step_id) || chainLatest
+    : chainLatest;
+  const completed = execution.state === "completed";
+  const statusLabel = {
+    in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "执行中",
+  }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
+  const evidenceImage = latest?.completion_evidence_url
+    ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
+  const evidenceItems = (latest?.evidence || []).map((item) =>
+    `<li><span>${esc(Number(item.timestamp_s).toFixed(1))}s</span>${esc(item.observation)}</li>`
+  ).join("");
+  const outcomeEvidence = latest?.status === "succeeded" && evidenceItems
+    ? `<div class="visual-success"><strong>成功证据</strong><ul>${evidenceItems}</ul></div>`
+    : latest?.failure_reason
+      ? `<div class="visual-failure"><strong>失败原因</strong><div>${esc(latest.failure_reason)}</div>${evidenceItems ? `<ul>${evidenceItems}</ul>` : ""}</div>`
+      : "";
+  const awaitingConfirmation = visual?.state === "awaiting_confirmation";
+  const requestedModel = visual?.model_requested || latest?.model_requested || chainLatest?.model_requested;
+  const actualModel = chainLatest?.model_actual || latest?.model_actual;
+  const modelLabel = actualModel && requestedModel && actualModel !== requestedModel
+    ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel || "等待模型信息";
+  const livePreview = visual?.camera_id
+    ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span class="live-preview-model">${esc(modelLabel)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
+    : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
+  const controls = completed ? "" : `<div class="monitor-buttons">
+      <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
+      ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}
+      <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
+    </div>`;
+  const note = completed
+    ? "整条任务已经完成；实时预览继续保持连接。"
+    : awaitingConfirmation
+      ? "VLM 判定当前步骤失败，已暂停请求并等待人工确认。"
+      : chainMode ? "中间步骤按视频内事件确认；最终步骤必须在 NOW 仍成立。" : "VLM 判定成功后将自动进入下一步骤。";
+  return `<div class="monitor-kicker">${chainMode ? "Chain Visual Monitor" : "Visual Monitor"} · Attempt ${esc(attempt?.attempt_no || "-")}</div>
+    ${livePreview}
+    ${pipelineMarkup(visual, chainLatest)}
+    <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
+    <div class="monitor-action">${esc(step.zh)}</div>
+    <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "同一个 6 秒窗口会联合判断整条原子操作链，并可一次推进多个连续步骤。" : "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。"))}</div>
+    ${outcomeEvidence}
+    ${evidenceImage}
+    ${controls}
+    <div class="monitor-note ${completed ? "success" : ""}">${note}</div>`;
+}
+
 function monitorControls() {
   if (execution.state === "ready") {
     const mode = execution.execution_mode || "robot_agent";
@@ -413,6 +464,13 @@ function monitorControls() {
   }
 
   const step = currentStep();
+  const chainMode = execution.execution_mode === "chain_visual_monitor";
+  const visualMode = execution.execution_mode === "visual_monitor" || chainMode;
+  const lastAttempt = step?.attempts?.[step.attempts.length - 1];
+  const visualAttempt = execution.active_attempt || lastAttempt;
+  if (visualMode && step && ["running", "completed"].includes(execution.state)) {
+    return visualMonitorControls(step, visualAttempt, chainMode, currentVisualMonitor());
+  }
   if (execution.state === "running" && step && execution.active_attempt) {
     const attempt = execution.active_attempt;
     const workflow = attempt.workflow || attempt.workflow_preview;
@@ -431,43 +489,6 @@ function monitorControls() {
           <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止后续调度</button>
         </div>
         <div class="monitor-note">网页终止不是物理急停；异常运动必须使用现场急停。</div>`;
-    }
-    const chainMode = execution.execution_mode === "chain_visual_monitor";
-    const visual = chainMode ? execution.chain_visual_monitor : attempt.visual_monitor;
-    if (execution.execution_mode === "visual_monitor" || chainMode) {
-      const chainLatest = visual?.latest;
-      const latest = chainMode
-        ? chainLatest?.step_updates?.find((item) => item.step_id === step.step_id) || chainLatest
-        : chainLatest;
-      const statusLabel = {
-        in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "执行中",
-      }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
-      const evidence = latest?.completion_evidence_url
-        ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
-      const timings = chainLatest?.timings_ms || latest?.timings_ms;
-      const awaitingConfirmation = visual?.state === "awaiting_confirmation";
-      const requestedModel = visual?.model_requested || latest?.model_requested || chainLatest?.model_requested;
-      const actualModel = chainLatest?.model_actual || latest?.model_actual;
-      const modelLabel = actualModel && requestedModel && actualModel !== requestedModel
-        ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel || "等待模型信息";
-      const livePreview = visual?.camera_id
-        ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span class="live-preview-model">${esc(modelLabel)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
-        : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
-      return `<div class="monitor-kicker">${chainMode ? "Chain Visual Monitor" : "Visual Monitor"} · Attempt ${attempt.attempt_no}</div>
-        ${livePreview}
-        ${pipelineMarkup(visual, chainLatest)}
-        <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
-        <div class="monitor-action">${esc(step.zh)}</div>
-        <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "同一个 6 秒窗口会联合判断整条原子操作链，并可一次推进多个连续步骤。" : "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。"))}</div>
-        ${latest?.failure_reason ? `<div class="visual-failure">${esc(latest.failure_reason)}</div>` : ""}
-        ${evidence}
-        ${timings ? `<div class="timing-grid"><span>编码 ${esc(timings.encode)} ms</span><span>百炼 ${esc(timings.bailian_total)} ms</span><span>服务端 ${esc(timings.server_job_total)} ms</span></div>` : ""}
-        <div class="monitor-buttons">
-          <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
-          ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}
-          <button class="control-btn danger" data-action="terminate" ${commandBusy ? "disabled" : ""}>终止任务</button>
-        </div>
-        <div class="monitor-note">${awaitingConfirmation ? "VLM 判定当前步骤失败，已暂停请求并等待人工确认。" : chainMode ? "中间步骤按视频内事件确认；最终步骤必须在 NOW 仍成立。" : "VLM 判定成功后将自动进入下一步骤。"}</div>`;
     }
     return `<div class="monitor-kicker">Virtual monitor · Attempt ${attempt.attempt_no}</div>
       <div class="timer-ring" id="timerRing"><div class="timer-copy"><strong id="secondsLeft">--</strong><span>SECONDS LEFT</span></div></div>
@@ -508,14 +529,49 @@ function formatTime(value) {
 
 function eventDescription(event) {
   const data = event.data || {};
-  const source = data.source ? `<span class="event-source">${esc(data.source)}</span>` : "";
-  let detail = EVENT_LABELS[event.type] || event.type;
-  if (data.attempt_no) detail += ` · attempt ${data.attempt_no}`;
-  return `<b>${esc(detail)}</b>${source}${data.detail ? `<div>${esc(data.detail)}</div>` : ""}`;
+  const observation = data.observation || {};
+  const status = observation.status || data.status || "in_progress";
+  const statusText = { succeeded: "成功", in_progress: "执行中", failed: "失败", unknown: "执行中" }[status] || status;
+  const sequence = observation.sequence ?? data.sequence;
+  const requestedModel = observation.model_requested;
+  const actualModel = observation.model_actual;
+  const model = actualModel && requestedModel && actualModel !== requestedModel
+    ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel;
+  const evidenceList = (observation.evidence || []).map((item) =>
+    `<li><span>${esc(Number(item.timestamp_s).toFixed(1))}s</span>${esc(item.observation)}</li>`
+  ).join("");
+  const stepUpdates = (observation.step_updates || []).map((item) => {
+    const step = execution.steps.find((candidate) => candidate.step_id === item.step_id);
+    const stepStatus = { succeeded: "成功", in_progress: "执行中", failed: "失败", unknown: "执行中" }[item.status] || item.status;
+    const evidence = (item.evidence || []).map((entry) =>
+      `<li><span>${esc(Number(entry.timestamp_s).toFixed(1))}s</span>${esc(entry.observation)}</li>`
+    ).join("");
+    return `<div class="event-step-result ${esc(item.status)}">
+      <div><strong>${esc(step?.zh || item.step_id)}</strong><em>${esc(stepStatus)}</em></div>
+      <p>${esc(item.description_zh || "无描述")}</p>
+      ${item.failure_reason ? `<div class="event-reason">${esc(item.failure_reason)}</div>` : ""}
+      ${evidence ? `<ul>${evidence}</ul>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="event-result-head"><b>VLM 判断：${esc(statusText)}</b>${sequence != null ? `<span>#${esc(sequence)}</span>` : ""}${model ? `<span>${esc(model)}</span>` : ""}</div>
+    <p class="event-description">${esc(observation.description_zh || data.detail || (event.type.endsWith(".error") ? "VLM 请求或结果解析失败" : "旧日志未保存详细描述"))}</p>
+    ${observation.failure_reason ? `<div class="event-reason">${esc(observation.failure_reason)}</div>` : ""}
+    ${observation.error ? `<div class="event-reason">技术错误：${esc(observation.error)}</div>` : ""}
+    ${evidenceList ? `<ul class="event-evidence">${evidenceList}</ul>` : ""}
+    ${stepUpdates}`;
+}
+
+function visualEvents() {
+  const allowed = new Set([
+    "visual_monitor.observation", "visual_monitor.error",
+    "chain_visual_monitor.observation", "chain_visual_monitor.error",
+  ]);
+  return (execution.events || []).filter((event) => allowed.has(event.type));
 }
 
 function renderEvents() {
-  const events = [...(execution.events || [])].reverse();
+  const events = [...visualEvents()].reverse();
+  if (!events.length) return `<div class="event-empty">等待 VLM 返回第一次判断…</div>`;
   return events.map((event) => `<div class="event-row"><span class="event-time">${formatTime(event.occurred_at)}</span><span class="event-text">${eventDescription(event)}</span></div>`).join("");
 }
 
@@ -552,7 +608,7 @@ function patchExecution() {
   patchMonitorBody();
   const logCard = document.querySelector(".log-card");
   const logCount = logCard?.querySelector("summary .card-heading span, summary > span");
-  if (logCount) logCount.textContent = `${execution.events?.length || 0} 条 · 点击展开`;
+  if (logCount) logCount.textContent = `${visualEvents().length} 次判断 · 点击展开`;
   const eventList = document.querySelector(".event-list");
   if (eventList) eventList.innerHTML = renderEvents();
   updateCountdown();
@@ -586,7 +642,7 @@ function renderExecution() {
       <aside class="monitor-card"><div class="card-heading"><h3>Monitor 控制台</h3><span>后端权威</span></div><div class="monitor-body">${monitorControls()}</div></aside>
     </div>
     <details class="log-card fade-in">
-      <summary class="card-heading"><h3>执行事件日志</h3><span>${execution.events?.length || 0} 条 · 点击展开</span></summary>
+      <summary class="card-heading"><h3>VLM 判断日志</h3><span>${visualEvents().length} 次判断 · 点击展开</span></summary>
       <div class="event-list">${renderEvents()}</div>
     </details>`;
   updateCountdown();
