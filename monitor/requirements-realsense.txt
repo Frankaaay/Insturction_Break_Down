@@ -1,5 +1,6 @@
 pyrealsense2>=2.56
 numpy>=1.26
+opencv-python-headless>=4.10
 Pillow>=10.0
 httpx>=0.27
 imageio-ffmpeg>=0.6

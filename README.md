@@ -23,7 +23,7 @@
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
 - **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
-- **RealSense Visual Monitor**:支持原子视觉与整链视觉；Windows 客户端每 6 秒上传一个完整 6 秒 RGB 视频窗口，服务器调用百炼并通过 SSE 展示观察结果
+- **RealSense Visual Monitor**:支持原子视觉与整链视觉；Windows 客户端默认上传同步 RGB+Depth 视觉窗口，服务器调用百炼并通过 SSE 展示观察结果
 
 ## 快速开始
 
@@ -76,13 +76,15 @@ python monitor/realsense_client.py probe --server https://112.74.61.202
 python monitor/realsense_client.py run --server https://112.74.61.202
 ```
 
-客户端使用 640×480@30 FPS 采集，向上传视频降采样为 6 FPS、H.264 CRF 28；每积累完整 6 秒便提交这 6 秒窗口，默认窗口和提交周期均为 6 秒。独立线程每 1 秒领取一次当前 assignment，编码和上传也在线程中进行，因此相机采集不会等待网络。每次切换步骤都会生成新的 generation、清空旧帧、重拍 BEFORE 并重新积累完整 6 秒窗口；旧 generation 的上传结果会被忽略。如果检查点到期时百炼仍在推理或本地上传槽繁忙，客户端每 0.5 秒重试并使用最新滚动窗口，不再浪费一个完整周期。VLM 返回 `succeeded` 时，后端原子保存观察结果并自动推进到下一步骤；客户端在 1 秒 assignment 轮询内切换 generation、清空旧窗口并重拍 BEFORE。VLM 返回 `failed` 时停止窗口上传并等待人工确认，点击“判断不准确，继续监控”会提升 monitor epoch、重拍 BEFORE。服务端以原子推理预留阻止同一 attempt 的并发或终态后重复百炼请求。服务器只允许 2 个跨相机并发推理，媒体保留 24 小时。当前已为 `A_001 Pick/logic0`、`A_003 Carry/logic0` 和 `A_002 Place/logic1` 建立动作专用视觉契约，其中 Carry 使用宽松成功和极窄失败边界。百炼默认 `qwen3.7-plus` 且关闭思考。网页在实时预览旁显示采集、编码、上传、百炼请求各阶段和计时；SSE 更新只局部替换状态内容，保留预览 WebSocket 与图像节点，避免日志更新造成画面闪烁。
+客户端使用 640×480@30 FPS 同步采集 RGB 与 Z16 深度，并通过 RealSense SDK 将深度对齐到 RGB。默认 VLM 视频把两侧各缩放到 480×360 后左右拼接为 960×360，再降采样到 6 FPS、编码为 H.264 CRF 28。深度图整段固定映射 0.25～2.0 米：近处红、远处蓝、无效深度黑色，不做逐帧归一化。每个检查点发送 `BEFORE RGB`、6 秒 RGB+Depth 拼接视频、`NOW RGB` 和 `NOW Depth`；物体身份以 RGB 为准，深度只辅助几何判断。若相机深度质量不适用，可加 `--visual-input rgb` 回退到原 RGB 路径；也可用 `--depth-min-m`、`--depth-max-m` 和 `--vlm-panel-width/height` 调整映射与尺寸。
+
+每积累完整 6 秒便提交这 6 秒窗口，默认窗口和提交周期均为 6 秒。独立线程每 1 秒领取一次当前 assignment，编码和上传也在线程中进行，因此相机采集不会等待网络。每次切换步骤都会生成新的 generation、清空旧帧、重拍 BEFORE 并重新积累完整 6 秒窗口；旧 generation 的上传结果会被忽略。如果检查点到期时百炼仍在推理或本地上传槽繁忙，客户端每 0.5 秒重试并使用最新滚动窗口，不再浪费一个完整周期。VLM 返回 `succeeded` 时，后端原子保存观察结果并自动推进到下一步骤；客户端在 1 秒 assignment 轮询内切换 generation、清空旧窗口并重拍 BEFORE。VLM 返回 `failed` 时停止窗口上传并等待人工确认，点击“判断不准确，继续监控”会提升 monitor epoch、重拍 BEFORE。服务端以原子推理预留阻止同一 attempt 的并发或终态后重复百炼请求。服务器只允许 2 个跨相机并发推理，媒体保留 24 小时。当前已为 `A_001 Pick/logic0`、`A_003 Carry/logic0` 和 `A_002 Place/logic1` 建立动作专用视觉契约，其中 Carry 使用宽松成功和极窄失败边界。百炼默认 `qwen3.7-plus` 且关闭思考。网页在实时预览旁显示采集、编码、上传、百炼请求各阶段和计时；SSE 更新只局部替换状态内容，保留预览 WebSocket 与图像节点，避免日志更新造成画面闪烁。
 
 整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端已确认步骤、当前及后续未完成步骤，以及上一窗口的逐步骤观察摘要。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。第一个窗口没有完成的动作可以在后续窗口继续判断，已确认成功的步骤进入跨窗口账本且不会回退。上一窗口摘要只作时序参考，不能替代当前窗口证据。中间步骤可在窗口内短暂完成后继续下一步，最终步骤仍必须在 NOW 中成立。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
 
 同一采集循环还会分出独立实时预览：默认以 3 FPS、640×480、JPEG quality 65 压缩，通过二进制 WebSocket 上传，不使用 Base64。服务端和每个网页订阅者都只保留最新一帧；慢连接覆盖旧帧，不会阻塞相机或 VLM。网页显示最近 2 秒实际收到的预览 FPS 和采集到展示的延迟。VLM 进入等待人工确认后，6 秒窗口和百炼请求暂停，但实时预览继续。可用 `--preview-fps`（最大 10）、`--preview-width`、`--preview-height` 和 `--preview-quality` 调整预览。
 
-每个 VLM 检查点上传 `BEFORE`、6 秒 H.264 视频和独立 `NOW` 结尾帧。状态以 NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后 1 秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
+每个 VLM 检查点默认上传 `BEFORE RGB`、6 秒 RGB+Depth H.264 拼接视频、独立 `NOW RGB` 结尾帧和同步 `NOW Depth`。状态以 NOW RGB 为主、NOW Depth 为几何辅助：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后 1 秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
 
 公网部署需要为 `/api/visual-monitor/live/` 转发 WebSocket Upgrade；当前服务器配置模板见 `deploy/nginx-instruction-breakdown.conf`。观看端使用 `OPERATOR_TOKEN`、采集端使用 `VISUAL_MONITOR_TOKEN`，认证消息在 WebSocket 建立后通过 TLS 发送，不放入 URL。
 
@@ -106,7 +108,7 @@ HTTP API(供其他程序调用):
 - `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
 - `POST /api/visual-monitor/claim` — RealSense 客户端领取当前 Visual Pick attempt
 - `POST /api/visual-monitor/baseline` — 上传操作开始前的 JPEG
-- `POST /api/visual-monitor/checkpoints` — 上传 6 秒 H.264 检查窗口并异步触发百炼
+- `POST /api/visual-monitor/checkpoints` — 上传 6 秒 RGB 或 RGB+Depth H.264 检查窗口、NOW RGB/Depth 并异步触发百炼
 - `POST /api/visual-monitor/upload-probe` — 只测采集/编码/上传，不请求模型
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:

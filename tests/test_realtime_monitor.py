@@ -5,12 +5,61 @@ from pathlib import Path
 from realtime_monitor import (
     CHAIN_OUTPUT_SCHEMA, OUTPUT_SCHEMA, ModelResponseValidationError,
     VisualMonitorConfig, VisualMonitorService,
-    normalize_model_json, validate_chain_result, validate_result,
+    build_multimodal_content, depth_input_instructions, normalize_model_json,
+    validate_chain_result, validate_result,
 )
 from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
 
 
 class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_rgbd_content_keeps_rgb_anchors_and_adds_depth_now(self):
+        content = build_multimodal_content(
+            prompt="COMMON PROMPT",
+            baseline_data="before",
+            video_data="video",
+            now_data="now",
+            chain_mode=True,
+            visual_input_format="rgb_depth_side_by_side",
+            depth_min_m=0.25,
+            depth_max_m=2.0,
+            now_depth_data="depth",
+        )
+        combined_text = "\n".join(
+            item["text"] for item in content if item["type"] == "text"
+        )
+        image_urls = [
+            item["image_url"]["url"] for item in content if item["type"] == "image_url"
+        ]
+        self.assertIn("左侧是 RGB", combined_text)
+        self.assertIn("0.25～2.00 米", combined_text)
+        self.assertIn("物体身份、颜色、类别必须以 RGB 为准", combined_text)
+        self.assertIn("NOW DEPTH", combined_text)
+        self.assertEqual(len(image_urls), 3)
+        self.assertTrue(image_urls[-1].endswith("depth"))
+
+    def test_rgb_content_does_not_claim_depth_input(self):
+        content = build_multimodal_content(
+            prompt="COMMON PROMPT",
+            baseline_data="before",
+            video_data="video",
+            now_data="now",
+            chain_mode=False,
+            visual_input_format="rgb",
+            depth_min_m=0.25,
+            depth_max_m=2.0,
+            now_depth_data=None,
+        )
+        combined_text = "\n".join(
+            item["text"] for item in content if item["type"] == "text"
+        )
+        self.assertNotIn("DEPTH", combined_text)
+        self.assertEqual(sum(item["type"] == "image_url" for item in content), 2)
+
+    def test_depth_prompt_rejects_identity_inference_from_depth(self):
+        prompt = depth_input_instructions(0.25, 2.0)
+        self.assertIn("物体身份", prompt)
+        self.assertIn("深度空洞", prompt)
+
     def test_realtime_schemas_expose_only_three_business_states(self):
         expected = ["in_progress", "succeeded", "failed"]
         self.assertEqual(OUTPUT_SCHEMA["properties"]["status"]["enum"], expected)

@@ -20,8 +20,10 @@ Set-Location monitor
 
 The Windows RealSense uploader is `realsense_client.py`; its small, separate
 dependency set is in `requirements-realsense.txt`. See the repository root
-README for `probe` and continuous `run` commands. It uses RGB only and does not
-require ROS.
+README for `probe` and continuous `run` commands. It uses `pyrealsense2`
+directly and does not require ROS. The default VLM input is a synchronized
+side-by-side RGB plus color-aligned depth video with separate RGB and depth NOW
+anchors; `--visual-input rgb` retains the RGB-only fallback.
 
 Prototype for testing whether a vision-language model can monitor short robot
 manipulation clips and decide whether an atomic operation is on track,

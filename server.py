@@ -566,11 +566,19 @@ async def upload_visual_checkpoint(
     capture_ms: float = Form(..., ge=0),
     encode_ms: float = Form(..., ge=0),
     upload_started_at: str | None = Form(default=None),
+    visual_input_format: str = Form(default="rgb"),
+    depth_min_m: float = Form(default=0.25, gt=0),
+    depth_max_m: float = Form(default=2.0, gt=0),
     video: UploadFile = File(...),
     now_image: UploadFile = File(...),
+    now_depth_image: UploadFile | None = File(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
     _require_visual_monitor(authorization)
+    if visual_input_format not in {"rgb", "rgb_depth_side_by_side"}:
+        raise HTTPException(status_code=422, detail="visual_input_format 非法")
+    if depth_max_m <= depth_min_m:
+        raise HTTPException(status_code=422, detail="深度范围必须满足 depth_max_m > depth_min_m")
     assignment = await execution_manager.claim_visual_monitor(camera_id)
     if not assignment or assignment["execution_id"] != execution_id or assignment["attempt_id"] != attempt_id:
         raise HTTPException(status_code=409, detail="Visual Monitor assignment 已过期")
@@ -584,7 +592,14 @@ async def upload_visual_checkpoint(
     try:
         path, size, video_write_ms = await visual_monitor.save_upload(video, ".mp4")
         now_path, now_size, now_write_ms = await visual_monitor.save_upload(now_image, ".jpg")
-        write_ms = video_write_ms + now_write_ms
+        now_depth_path = None
+        now_depth_size = 0
+        now_depth_write_ms = 0.0
+        if now_depth_image is not None:
+            now_depth_path, now_depth_size, now_depth_write_ms = await visual_monitor.save_upload(
+                now_depth_image, ".jpg",
+            )
+        write_ms = video_write_ms + now_write_ms + now_depth_write_ms
         visual_monitor.cleanup_expired()
         await execution_manager.begin_visual_checkpoint(
             execution_id,
@@ -617,6 +632,10 @@ async def upload_visual_checkpoint(
                 baseline_path=baseline,
                 video_path=path,
                 now_path=now_path,
+                now_depth_path=now_depth_path,
+                visual_input_format=visual_input_format,
+                depth_min_m=depth_min_m,
+                depth_max_m=depth_max_m,
                 client_timings={
                     "capture": capture_ms,
                     "encode": encode_ms,
@@ -640,6 +659,8 @@ async def upload_visual_checkpoint(
             "sequence": sequence,
             "bytes": size,
             "now_bytes": now_size,
+            "now_depth_bytes": now_depth_size,
+            "visual_input_format": visual_input_format,
             "server_write_ms": round(write_ms, 1),
             "in_flight": visual_monitor.in_flight,
             "received_at": utc_iso(),

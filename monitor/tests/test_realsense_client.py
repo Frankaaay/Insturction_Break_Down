@@ -1,10 +1,13 @@
 import unittest
 from collections import deque
+import tempfile
 import struct
+from pathlib import Path
 
 from monitor.realsense_client import (
     LivePreviewSender, RealSenseMonitorClient, assignment_identity,
-    checkpoint_block_reason, parser, sample_window, uploads_paused,
+    checkpoint_block_reason, colorize_aligned_depth, compose_rgb_depth_frame,
+    encode_mp4, parser, sample_window, uploads_paused,
 )
 
 
@@ -49,6 +52,59 @@ class RealSenseClientTests(unittest.TestCase):
         self.assertEqual(args.preview_fps, 3.0)
         self.assertEqual((args.preview_width, args.preview_height), (640, 480))
         self.assertEqual(args.preview_quality, 65)
+        self.assertEqual(args.visual_input, "rgbd")
+        self.assertEqual((args.depth_min_m, args.depth_max_m), (0.25, 2.0))
+        self.assertEqual((args.vlm_panel_width, args.vlm_panel_height), (480, 360))
+
+    def test_fixed_depth_colormap_marks_near_red_far_blue_and_invalid_black(self):
+        import cv2
+        import numpy as np
+
+        depth_raw = np.array([[0, 250], [1000, 2000]], dtype=np.uint16)
+        colored = colorize_aligned_depth(
+            depth_raw,
+            depth_scale=0.001,
+            depth_min_m=0.25,
+            depth_max_m=2.0,
+            np_module=np,
+            cv2_module=cv2,
+        )
+        self.assertTrue((colored[0, 0] == 0).all())
+        self.assertGreater(int(colored[0, 1, 0]), int(colored[0, 1, 2]))
+        self.assertGreater(int(colored[1, 1, 2]), int(colored[1, 1, 0]))
+
+    def test_rgb_depth_composite_has_two_equal_synchronized_panels(self):
+        import cv2
+        import numpy as np
+
+        rgb = np.full((48, 64, 3), 100, dtype=np.uint8)
+        depth = np.full((48, 64, 3), 200, dtype=np.uint8)
+        composite, depth_panel = compose_rgb_depth_frame(
+            rgb,
+            depth,
+            panel_width=80,
+            panel_height=60,
+            depth_min_m=0.25,
+            depth_max_m=2.0,
+            np_module=np,
+            cv2_module=cv2,
+        )
+        self.assertEqual(composite.shape, (60, 160, 3))
+        self.assertEqual(depth_panel.shape, (60, 80, 3))
+
+    def test_rgbd_mp4_preserves_960_by_360_without_macroblock_resize(self):
+        import imageio_ffmpeg
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "rgbd.mp4"
+            encode_mp4([np.zeros((360, 960, 3), dtype=np.uint8)], output, fps=6)
+            reader = imageio_ffmpeg.read_frames(str(output), pix_fmt="rgb24")
+            try:
+                metadata = next(reader)
+            finally:
+                reader.close()
+            self.assertEqual(metadata["size"], (960, 360))
 
     def test_preview_fps_parser_accepts_ten(self):
         self.assertEqual(parser().parse_args(["run", "--preview-fps", "10"]).preview_fps, 10.0)

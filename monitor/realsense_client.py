@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Windows RealSense RGB client for the Planner Monitor server."""
+"""Windows RealSense RGB/RGB-D client for the Planner Monitor server."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ def utc_iso(timestamp: float | None = None) -> str:
 
 def require_camera_modules():
     try:
+        import cv2
         import numpy as np
         import pyrealsense2 as rs
         from PIL import Image
@@ -37,7 +38,70 @@ def require_camera_modules():
         raise RuntimeError(
             "缺少 RealSense 客户端依赖，请运行: pip install -r monitor/requirements-realsense.txt"
         ) from exc
-    return np, rs, Image
+    return np, rs, Image, cv2
+
+
+def colorize_aligned_depth(
+    depth_raw: Any,
+    *,
+    depth_scale: float,
+    depth_min_m: float,
+    depth_max_m: float,
+    np_module: Any,
+    cv2_module: Any,
+) -> Any:
+    """Convert aligned Z16 depth into a fixed, model-readable RGB color map."""
+    if depth_min_m <= 0 or depth_max_m <= depth_min_m:
+        raise ValueError("深度范围必须满足 0 < depth_min_m < depth_max_m")
+    depth_m = depth_raw.astype(np_module.float32) * float(depth_scale)
+    valid = (depth_m >= depth_min_m) & (depth_m <= depth_max_m)
+    # OpenCV JET maps high values to red and low values to blue. Invert metric
+    # depth so near=red and far=blue, then restore invalid pixels to black.
+    normalized = np_module.clip(
+        (depth_max_m - depth_m) / (depth_max_m - depth_min_m), 0.0, 1.0,
+    )
+    depth_u8 = (normalized * 255.0).astype(np_module.uint8)
+    depth_bgr = cv2_module.applyColorMap(depth_u8, cv2_module.COLORMAP_JET)
+    depth_rgb = cv2_module.cvtColor(depth_bgr, cv2_module.COLOR_BGR2RGB)
+    depth_rgb[~valid] = 0
+    return depth_rgb
+
+
+def compose_rgb_depth_frame(
+    rgb: Any,
+    depth_rgb: Any,
+    *,
+    panel_width: int,
+    panel_height: int,
+    depth_min_m: float,
+    depth_max_m: float,
+    np_module: Any,
+    cv2_module: Any,
+) -> tuple[Any, Any]:
+    """Build one synchronized side-by-side RGB/depth frame plus NOW depth panel."""
+    size = (panel_width, panel_height)
+    rgb_panel = cv2_module.resize(rgb, size, interpolation=cv2_module.INTER_AREA)
+    depth_panel = cv2_module.resize(depth_rgb, size, interpolation=cv2_module.INTER_NEAREST)
+
+    def label(image: Any, title: str, subtitle: str | None = None) -> None:
+        cv2_module.rectangle(image, (0, 0), (panel_width, 42), (0, 0, 0), -1)
+        cv2_module.putText(
+            image, title, (10, 18), cv2_module.FONT_HERSHEY_SIMPLEX,
+            0.52, (255, 255, 255), 1, cv2_module.LINE_AA,
+        )
+        if subtitle:
+            cv2_module.putText(
+                image, subtitle, (10, 36), cv2_module.FONT_HERSHEY_SIMPLEX,
+                0.38, (255, 255, 255), 1, cv2_module.LINE_AA,
+            )
+
+    label(rgb_panel, "RGB")
+    label(
+        depth_panel,
+        "DEPTH ALIGNED TO RGB",
+        f"RED NEAR {depth_min_m:.2f}m | BLUE FAR {depth_max_m:.2f}m | BLACK INVALID",
+    )
+    return np_module.concatenate([rgb_panel, depth_panel], axis=1), depth_panel
 
 
 def encode_mp4(frames: list[Any], output: Path, fps: int = 6) -> None:
@@ -50,7 +114,7 @@ def encode_mp4(frames: list[Any], output: Path, fps: int = 6) -> None:
     height, width = frames[0].shape[:2]
     writer = imageio_ffmpeg.write_frames(
         str(output), (width, height), fps=fps, codec="libx264", pix_fmt_in="rgb24",
-        pix_fmt_out="yuv420p",
+        pix_fmt_out="yuv420p", macro_block_size=2,
         output_params=["-crf", "28", "-movflags", "+faststart", "-an"],
     )
     writer.send(None)
@@ -261,7 +325,7 @@ class RealSenseMonitorClient:
             verify=not args.insecure,
             trust_env=not args.no_proxy,
         )
-        self.np, self.rs, self.Image = require_camera_modules()
+        self.np, self.rs, self.Image, self.cv2 = require_camera_modules()
 
     def open_camera(self):
         pipeline = self.rs.pipeline()
@@ -269,9 +333,21 @@ class RealSenseMonitorClient:
         if self.args.serial:
             config.enable_device(self.args.serial)
         config.enable_stream(self.rs.stream.color, 640, 480, self.rs.format.rgb8, 30)
+        if self.args.visual_input == "rgbd":
+            config.enable_stream(self.rs.stream.depth, 640, 480, self.rs.format.z16, 30)
         profile = pipeline.start(config)
-        sensor = profile.get_device().first_color_sensor()
-        return pipeline, profile.get_device().get_info(self.rs.camera_info.serial_number), sensor
+        device = profile.get_device()
+        aligner = self.rs.align(self.rs.stream.color) if self.args.visual_input == "rgbd" else None
+        depth_scale = (
+            float(device.first_depth_sensor().get_depth_scale())
+            if self.args.visual_input == "rgbd" else None
+        )
+        return (
+            pipeline,
+            device.get_info(self.rs.camera_info.serial_number),
+            aligner,
+            depth_scale,
+        )
 
     @staticmethod
     def warm_up(pipeline, frame_count: int = 30) -> None:
@@ -279,8 +355,43 @@ class RealSenseMonitorClient:
         for _ in range(frame_count):
             pipeline.wait_for_frames(3000)
 
+    def read_visual_frame(
+        self, pipeline: Any, aligner: Any, depth_scale: float | None,
+    ) -> tuple[Any, Any | None, Any] | None:
+        frameset = pipeline.wait_for_frames(3000)
+        if aligner is not None:
+            frameset = aligner.process(frameset)
+        color = frameset.get_color_frame()
+        if not color:
+            return None
+        rgb = self.np.asanyarray(color.get_data()).copy()
+        if self.args.visual_input == "rgb":
+            return rgb, None, rgb
+        depth = frameset.get_depth_frame()
+        if not depth or depth_scale is None:
+            return None
+        depth_rgb = colorize_aligned_depth(
+            self.np.asanyarray(depth.get_data()),
+            depth_scale=depth_scale,
+            depth_min_m=self.args.depth_min_m,
+            depth_max_m=self.args.depth_max_m,
+            np_module=self.np,
+            cv2_module=self.cv2,
+        )
+        composite, depth_panel = compose_rgb_depth_frame(
+            rgb,
+            depth_rgb,
+            panel_width=self.args.vlm_panel_width,
+            panel_height=self.args.vlm_panel_height,
+            depth_min_m=self.args.depth_min_m,
+            depth_max_m=self.args.depth_max_m,
+            np_module=self.np,
+            cv2_module=self.cv2,
+        )
+        return rgb, depth_panel, composite
+
     def capture_probe(self) -> dict[str, Any]:
-        pipeline, serial, _ = self.open_camera()
+        pipeline, serial, aligner, depth_scale = self.open_camera()
         self.warm_up(pipeline)
         started = time.perf_counter()
         capture_finished = started
@@ -289,9 +400,10 @@ class RealSenseMonitorClient:
         try:
             deadline = time.perf_counter() + self.args.window_seconds
             while time.perf_counter() < deadline:
-                color = pipeline.wait_for_frames(3000).get_color_frame()
-                if color:
-                    frames.append((time.time(), self.np.asanyarray(color.get_data()).copy()))
+                packet = self.read_visual_frame(pipeline, aligner, depth_scale)
+                if packet:
+                    _, _, vlm_frame = packet
+                    frames.append((time.time(), vlm_frame))
         finally:
             capture_finished = time.perf_counter()
             stop_started = time.perf_counter()
@@ -309,7 +421,14 @@ class RealSenseMonitorClient:
             with video_path.open("rb") as handle:
                 response = self.http.post(
                     "/api/visual-monitor/upload-probe",
-                    data={"camera_id": serial, "capture_ms": capture_ms, "encode_ms": encode_ms},
+                    data={
+                        "camera_id": serial,
+                        "capture_ms": capture_ms,
+                        "encode_ms": encode_ms,
+                        "visual_input_format": (
+                            "rgb_depth_side_by_side" if self.args.visual_input == "rgbd" else "rgb"
+                        ),
+                    },
                     files={"video": ("window.mp4", handle, "video/mp4")},
                 )
             upload_ms = (time.perf_counter() - upload_started) * 1000
@@ -320,6 +439,12 @@ class RealSenseMonitorClient:
             result["frame_count_uploaded"] = len(selected)
             result["local_file_bytes"] = video_path.stat().st_size
             result["device_stop_ms"] = round(stop_ms, 1)
+            result["visual_input_format"] = (
+                "rgb_depth_side_by_side" if self.args.visual_input == "rgbd" else "rgb"
+            )
+            if depth_scale is not None:
+                result["depth_scale_m"] = depth_scale
+                result["depth_range_m"] = [self.args.depth_min_m, self.args.depth_max_m]
             return result
         finally:
             video_path.unlink(missing_ok=True)
@@ -371,7 +496,8 @@ class RealSenseMonitorClient:
 
     def upload_checkpoint(
         self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
-        frames: list[Any], now_frame: Any, window_start: float, window_end: float,
+        frames: list[Any], now_frame: Any, now_depth_frame: Any | None,
+        window_start: float, window_end: float,
     ) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
@@ -387,6 +513,12 @@ class RealSenseMonitorClient:
             self.Image.fromarray(now_frame).save(
                 now_payload, format="JPEG", quality=82, optimize=True,
             )
+            now_depth_payload = None
+            if now_depth_frame is not None:
+                now_depth_payload = io.BytesIO()
+                self.Image.fromarray(now_depth_frame).save(
+                    now_depth_payload, format="JPEG", quality=88, optimize=True,
+                )
             encode_ms = (time.perf_counter() - encode_started) * 1000
             upload_started_wall = time.time()
             self.report_phase(
@@ -395,6 +527,16 @@ class RealSenseMonitorClient:
             )
             upload_started = time.perf_counter()
             with video_path.open("rb") as handle:
+                files = {
+                    "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
+                    "now_image": (f"now-{sequence:04d}.jpg", now_payload.getvalue(), "image/jpeg"),
+                }
+                if now_depth_payload is not None:
+                    files["now_depth_image"] = (
+                        f"now-depth-{sequence:04d}.jpg",
+                        now_depth_payload.getvalue(),
+                        "image/jpeg",
+                    )
                 response = self.http.post(
                     "/api/visual-monitor/checkpoints",
                     data={
@@ -403,11 +545,13 @@ class RealSenseMonitorClient:
                         "window_started_at": utc_iso(window_start), "window_ended_at": utc_iso(window_end),
                         "capture_ms": (window_end - window_start) * 1000, "encode_ms": encode_ms,
                         "upload_started_at": utc_iso(upload_started_wall),
+                        "visual_input_format": (
+                            "rgb_depth_side_by_side" if self.args.visual_input == "rgbd" else "rgb"
+                        ),
+                        "depth_min_m": self.args.depth_min_m,
+                        "depth_max_m": self.args.depth_max_m,
                     },
-                    files={
-                        "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
-                        "now_image": (f"now-{sequence:04d}.jpg", now_payload.getvalue(), "image/jpeg"),
-                    },
+                    files=files,
                 )
             upload_ms = (time.perf_counter() - upload_started) * 1000
             if response.status_code == 429:
@@ -420,7 +564,7 @@ class RealSenseMonitorClient:
             video_path.unlink(missing_ok=True)
 
     def run(self) -> None:
-        pipeline, camera_id, _ = self.open_camera()
+        pipeline, camera_id, aligner, depth_scale = self.open_camera()
         self.warm_up(pipeline)
         ring: deque = deque()
         assignment = None
@@ -439,11 +583,11 @@ class RealSenseMonitorClient:
         print(json.dumps({"event": "camera.ready", "camera_id": camera_id}, ensure_ascii=False))
         try:
             while True:
-                color = pipeline.wait_for_frames(3000).get_color_frame()
-                if not color:
+                packet = self.read_visual_frame(pipeline, aligner, depth_scale)
+                if packet is None:
                     continue
                 now = time.time()
-                frame = self.np.asanyarray(color.get_data()).copy()
+                frame, now_depth_frame, vlm_frame = packet
                 if now >= next_preview:
                     preview.offer(frame, now)
                     next_preview = now + 1.0 / self.args.preview_fps
@@ -474,7 +618,7 @@ class RealSenseMonitorClient:
                         }, ensure_ascii=False))
                         pause_announced = True
                     continue
-                ring.append((now, frame))
+                ring.append((now, vlm_frame))
                 while ring and ring[0][0] < now - self.args.window_seconds - 1:
                     ring.popleft()
                 for future in list(pending):
@@ -515,7 +659,9 @@ class RealSenseMonitorClient:
                         pending.add(workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,
-                            selected, frame.copy(), window_start, now,
+                            selected, frame.copy(),
+                            now_depth_frame.copy() if now_depth_frame is not None else None,
+                            window_start, now,
                         ))
                         next_checkpoint = now + self.args.cycle_seconds
                     else:
@@ -541,6 +687,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cycle-seconds", type=float, default=6.0)
     result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
+    result.add_argument(
+        "--visual-input", choices=["rgbd", "rgb"], default="rgbd",
+        help="VLM 输入；rgbd 为同步 RGB+对齐深度拼接视频，rgb 为兼容回退",
+    )
+    result.add_argument("--depth-min-m", type=float, default=0.25)
+    result.add_argument("--depth-max-m", type=float, default=2.0)
+    result.add_argument("--vlm-panel-width", type=int, default=480)
+    result.add_argument("--vlm-panel-height", type=int, default=360)
     result.add_argument("--preview-fps", type=float, default=3.0)
     result.add_argument("--preview-width", type=int, default=640)
     result.add_argument("--preview-height", type=int, default=480)
@@ -558,9 +712,14 @@ def main() -> int:
         or args.assignment_poll_seconds <= 0 or args.video_fps <= 0
         or not 0 < args.preview_fps <= 10
         or args.preview_width <= 0 or args.preview_height <= 0
+        or args.vlm_panel_width <= 0 or args.vlm_panel_height <= 0
+        or args.depth_min_m <= 0 or args.depth_max_m <= args.depth_min_m
         or not 1 <= args.preview_quality <= 95
     ):
-        raise SystemExit("窗口、周期和视频 FPS 必须大于 0，实时预览 FPS 不能超过 10")
+        raise SystemExit(
+            "窗口、周期、图像尺寸和视频 FPS 必须大于 0，实时预览 FPS 不能超过 10，"
+            "深度范围必须满足 0 < min < max"
+        )
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     client = RealSenseMonitorClient(args)
     if args.command == "probe":

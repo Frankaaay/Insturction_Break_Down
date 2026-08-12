@@ -128,6 +128,50 @@ class VisualMonitorConfig:
         )
 
 
+def depth_input_instructions(depth_min_m: float, depth_max_m: float) -> str:
+    return f"""视觉输入说明：
+- 6 秒 WINDOW 的每一帧左右拼接且严格同步：左侧是 RGB，右侧是已对齐到 RGB 坐标的深度伪彩图。
+- 深度图使用整段固定范围 {depth_min_m:.2f}～{depth_max_m:.2f} 米：红色表示靠近相机，蓝色表示远离相机，黑色表示无有效深度。
+- 物体身份、颜色、类别必须以 RGB 为准；深度只辅助判断真实空间移动、离开或接触支撑面、前后关系和遮挡下的几何变化。
+- 不得把深度空洞、黑色无效区域、物体边缘噪声或快速运动拖影解释为物体消失、拿起、掉落或放置成功。
+- NOW RGB 是当前最终状态的主要依据；NOW DEPTH 与其同步，只作为当前几何状态的辅助证据。"""
+
+
+def build_multimodal_content(
+    *,
+    prompt: str,
+    baseline_data: str,
+    video_data: str,
+    now_data: str,
+    chain_mode: bool,
+    visual_input_format: str,
+    depth_min_m: float,
+    depth_max_m: float,
+    now_depth_data: str | None,
+) -> list[dict[str, Any]]:
+    rgbd = visual_input_format == "rgb_depth_side_by_side"
+    if rgbd:
+        prompt = f"{prompt}\n\n{depth_input_instructions(depth_min_m, depth_max_m)}"
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": "BEFORE RGB：本次整条操作链开始前的初始彩色画面。" if chain_mode else "BEFORE RGB：本原子操作开始前的初始彩色画面。"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{baseline_data}"}},
+        {"type": "text", "text": (
+            "WINDOW：从 BEFORE 之后到当前检查点的 6 秒同步视频；每帧左侧 RGB、右侧对齐深度。"
+            if rgbd else "WINDOW：从 BEFORE 之后到当前检查点的 6 秒 RGB 视频。"
+        )},
+        {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
+        {"type": "text", "text": "NOW RGB：检查点结束时的当前彩色画面；最终状态必须以此画面为准。"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{now_data}"}},
+    ]
+    if rgbd and now_depth_data is not None:
+        content.extend([
+            {"type": "text", "text": "NOW DEPTH：与 NOW RGB 同步并对齐的深度伪彩图，仅用于辅助当前几何关系。"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{now_depth_data}"}},
+        ])
+    return content
+
+
 def normalize_model_json(value: Any) -> tuple[dict[str, Any], list[str]]:
     """Normalize only known provider deviations before strict validation."""
     applied: list[str] = []
@@ -317,6 +361,10 @@ class VisualMonitorService:
         video_path: Path,
         now_path: Path,
         client_timings: dict[str, float],
+        now_depth_path: Path | None = None,
+        visual_input_format: str = "rgb",
+        depth_min_m: float = 0.25,
+        depth_max_m: float = 2.0,
     ) -> None:
         if len(self._tasks) >= self.config.max_concurrency:
             raise RuntimeError("Visual Monitor 推理并发已满，请等待下一个检查点")
@@ -329,6 +377,10 @@ class VisualMonitorService:
                 video_path=video_path,
                 now_path=now_path,
                 client_timings=client_timings,
+                now_depth_path=now_depth_path,
+                visual_input_format=visual_input_format,
+                depth_min_m=depth_min_m,
+                depth_max_m=depth_max_m,
             ),
             name=f"visual-monitor:{assignment['execution_id']}:{sequence}",
         )
@@ -345,7 +397,15 @@ class VisualMonitorService:
         }
         try:
             call_result = await self._call_bailian(
-                assignment, job["sequence"], job["baseline_path"], job["video_path"], job["now_path"]
+                assignment,
+                job["sequence"],
+                job["baseline_path"],
+                job["video_path"],
+                job["now_path"],
+                job.get("now_depth_path"),
+                job.get("visual_input_format", "rgb"),
+                float(job.get("depth_min_m", 0.25)),
+                float(job.get("depth_max_m", 2.0)),
             )
             if len(call_result) == 4:
                 result, timings, actual_model, raw = call_result
@@ -374,6 +434,15 @@ class VisualMonitorService:
                 "model_actual": actual_model,
                 "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
                 "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
+                "now_depth_url": (
+                    f"/api/visual-monitor/media/{job['now_depth_path'].name}"
+                    if job.get("now_depth_path") else None
+                ),
+                "visual_input_format": job.get("visual_input_format", "rgb"),
+                "depth_range_m": (
+                    [job.get("depth_min_m"), job.get("depth_max_m")]
+                    if job.get("visual_input_format") == "rgb_depth_side_by_side" else None
+                ),
                 "completion_evidence_url": evidence_url,
                 "timings_ms": {
                     **job["client_timings"],
@@ -428,6 +497,11 @@ class VisualMonitorService:
                 "model_actual": getattr(exc, "actual_model", None),
                 "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
                 "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
+                "now_depth_url": (
+                    f"/api/visual-monitor/media/{job['now_depth_path'].name}"
+                    if job.get("now_depth_path") else None
+                ),
+                "visual_input_format": job.get("visual_input_format", "rgb"),
                 "timings_ms": {
                     **job["client_timings"],
                     **error_timings,
@@ -467,7 +541,9 @@ class VisualMonitorService:
 
     async def _call_bailian(
         self, assignment: dict[str, Any], sequence: int, baseline_path: Path,
-        video_path: Path, now_path: Path,
+        video_path: Path, now_path: Path, now_depth_path: Path | None = None,
+        visual_input_format: str = "rgb", depth_min_m: float = 0.25,
+        depth_max_m: float = 2.0,
     ) -> tuple[dict[str, Any], dict[str, float], str, str, dict[str, Any]]:
         key = os.getenv("DASHSCOPE_API_KEY", "")
         if not key:
@@ -476,6 +552,10 @@ class VisualMonitorService:
         baseline_data = base64.b64encode(baseline_path.read_bytes()).decode("ascii")
         video_data = base64.b64encode(video_path.read_bytes()).decode("ascii")
         now_data = base64.b64encode(now_path.read_bytes()).decode("ascii")
+        now_depth_data = (
+            base64.b64encode(now_depth_path.read_bytes()).decode("ascii")
+            if now_depth_path is not None else None
+        )
         prep_ms = (time.perf_counter() - prep_started) * 1000
         chain_mode = assignment.get("monitor_scope") == "chain"
         output_schema = copy.deepcopy(CHAIN_OUTPUT_SCHEMA if chain_mode else OUTPUT_SCHEMA)
@@ -486,17 +566,20 @@ class VisualMonitorService:
                 "maxItems": pending_count,
             })
         prompt = build_chain_monitor_prompt(assignment, sequence) if chain_mode else build_monitor_prompt(assignment, sequence)
+        content = build_multimodal_content(
+            prompt=prompt,
+            baseline_data=baseline_data,
+            video_data=video_data,
+            now_data=now_data,
+            chain_mode=chain_mode,
+            visual_input_format=visual_input_format,
+            depth_min_m=depth_min_m,
+            depth_max_m=depth_max_m,
+            now_depth_data=now_depth_data,
+        )
         payload = {
             "model": self.config.model,
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "text", "text": "BEFORE：本次整条操作链开始前的初始画面。" if chain_mode else "BEFORE：本原子操作开始前的初始画面。"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{baseline_data}"}},
-                {"type": "text", "text": "WINDOW：从 BEFORE 之后到当前检查点的 6 秒视频。"},
-                {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
-                {"type": "text", "text": "NOW：检查点结束时的当前画面；最终状态必须以此画面为准。"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{now_data}"}},
-            ]}],
+            "messages": [{"role": "user", "content": content}],
             "enable_thinking": False,
             "temperature": 0,
             "response_format": {

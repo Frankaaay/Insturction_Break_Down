@@ -206,7 +206,10 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             VisualMonitorConfig(Path(temporary.name), max_concurrency=2),
         )
 
+        received_call = []
+
         async def fake_call(*args):
+            received_call.append(args)
             return ({
                 "status": "in_progress", "description_zh": "手正在接近杯子",
                 "failure_reason": None,
@@ -231,9 +234,12 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "window_started_at": "2026-08-06T00:00:00Z",
                 "window_ended_at": "2026-08-06T00:00:06Z",
                 "capture_ms": "6000", "encode_ms": "80",
+                "visual_input_format": "rgb_depth_side_by_side",
+                "depth_min_m": "0.25", "depth_max_m": "2.0",
             }, files={
                 "video": ("window.mp4", b"mp4", "video/mp4"),
                 "now_image": ("now.jpg", b"jpeg-now", "image/jpeg"),
+                "now_depth_image": ("now-depth.jpg", b"jpeg-depth", "image/jpeg"),
             })
             self.assertEqual(checkpoint.status_code, 202)
             for _ in range(20):
@@ -243,6 +249,11 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             snapshot = (await self.client.get(f"/api/executions/{created['execution_id']}")).json()["execution"]
             self.assertEqual(snapshot["state"], "running")
             self.assertEqual(snapshot["active_attempt"]["visual_monitor"]["latest"]["status"], "in_progress")
+            latest = snapshot["active_attempt"]["visual_monitor"]["latest"]
+            self.assertEqual(latest["visual_input_format"], "rgb_depth_side_by_side")
+            self.assertTrue(latest["now_depth_url"].endswith(".jpg"))
+            self.assertEqual(received_call[0][6], "rgb_depth_side_by_side")
+            self.assertEqual(received_call[0][7:9], (0.25, 2.0))
         finally:
             await service.close()
             server.visual_monitor = previous_service
