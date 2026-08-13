@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""In-memory latest-frame relay for low-latency RealSense previews."""
+"""In-memory latest-frame relay for low-latency camera previews."""
 
 from __future__ import annotations
 

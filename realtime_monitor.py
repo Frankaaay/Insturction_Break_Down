@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Realtime visual-monitor service for short RealSense video windows."""
+"""Realtime visual-monitor service for short camera video windows."""
 
 from __future__ import annotations
 

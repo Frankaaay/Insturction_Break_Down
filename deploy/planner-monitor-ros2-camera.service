@@ -1,0 +1,16 @@
+[Unit]
+Description=Planner Monitor ROS2 head camera client
+Wants=network-online.target planner-monitor-web.service
+After=network-online.target planner-monitor-web.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace/planner_monitor
+EnvironmentFile=/root/workspace/planner_monitor/.env
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec /root/workspace/planner_monitor/.venv/bin/python -m monitor.ros2_camera_client run'
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

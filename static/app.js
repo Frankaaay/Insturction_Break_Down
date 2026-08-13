@@ -405,7 +405,7 @@ function visualMonitorControls(step, attempt, chainMode, visual) {
   const completed = execution.state === "completed";
   const statusLabel = {
     in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "执行中",
-  }[latest?.status] || (visual ? "等待首次判断" : "等待 RealSense 客户端");
+  }[latest?.status] || (visual ? "等待首次判断" : "等待 ROS2 相机客户端");
   const evidenceImage = latest?.completion_evidence_url
     ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
   const evidenceItems = (latest?.evidence || []).map((item) =>
@@ -422,8 +422,8 @@ function visualMonitorControls(step, attempt, chainMode, visual) {
   const modelLabel = actualModel && requestedModel && actualModel !== requestedModel
     ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel || "等待模型信息";
   const livePreview = visual?.camera_id
-    ? `<div class="live-preview"><img id="livePreviewImage" alt="RealSense 实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span class="live-preview-model">${esc(modelLabel)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
-    : `<div class="live-preview waiting"><div>等待 RealSense 客户端连接</div></div>`;
+    ? `<div class="live-preview"><img id="livePreviewImage" alt="ROS2 相机实时画面"><div class="live-preview-meta"><span>${esc(visual.camera_id)}</span><span class="live-preview-model">${esc(modelLabel)}</span><span id="livePreviewStatus" class="live-preview-status wait">连接实时画面…</span></div></div>`
+    : `<div class="live-preview waiting"><div>等待 ROS2 相机客户端连接</div></div>`;
   const controls = completed ? "" : `<div class="monitor-buttons">
       <button class="control-btn failure" data-action="report-failure" ${commandBusy ? "disabled" : ""}>人工确认失败</button>
       ${awaitingConfirmation ? `<button class="control-btn primary" data-action="resume-monitor" ${commandBusy ? "disabled" : ""}>判断不准确，继续监控</button>` : ""}

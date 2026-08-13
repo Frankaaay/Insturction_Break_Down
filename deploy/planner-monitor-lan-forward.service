@@ -1,0 +1,14 @@
+[Unit]
+Description=Forward chassis LAN port 8000 to Planner Monitor on ARM
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 192.168.51.168:8000:127.0.0.1:8000 arm
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

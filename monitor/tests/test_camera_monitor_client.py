@@ -2,14 +2,17 @@ import unittest
 from collections import deque
 import struct
 
-from monitor.realsense_client import (
-    LivePreviewSender, RealSenseMonitorClient, assignment_identity,
+from monitor.camera_monitor_client import (
+    LivePreviewSender, MonitorClient, assignment_identity,
     checkpoint_block_reason, parser, sample_window, uploads_paused,
+)
+from monitor.ros2_camera_client import (
+    DEFAULT_CAMERA_ID, DEFAULT_TOPIC, parser as ros2_parser, validate_ros2_args,
 )
 
 
 class FakePreviewImage:
-    size = (640, 480)
+    size = (640, 352)
 
     def save(self, payload, **kwargs):
         payload.write(b"\xff\xd8preview-jpeg\xff\xd9")
@@ -40,18 +43,26 @@ class FakeHttpClient:
         return FakeHttpResponse()
 
 
-class RealSenseClientTests(unittest.TestCase):
+class CameraMonitorClientTests(unittest.TestCase):
     def test_default_window_and_submission_cycle_are_both_six_seconds(self):
         args = parser().parse_args(["probe"])
         self.assertEqual(args.window_seconds, 6.0)
         self.assertEqual(args.cycle_seconds, 6.0)
         self.assertEqual(args.assignment_poll_seconds, 1.0)
-        self.assertEqual(args.preview_fps, 3.0)
-        self.assertEqual((args.preview_width, args.preview_height), (640, 480))
+        self.assertEqual(args.preview_fps, 10.0)
+        self.assertEqual((args.preview_width, args.preview_height), (640, 352))
         self.assertEqual(args.preview_quality, 65)
+        self.assertEqual(args.server, "http://127.0.0.1:8000")
 
     def test_preview_fps_parser_accepts_ten(self):
         self.assertEqual(parser().parse_args(["run", "--preview-fps", "10"]).preview_fps, 10.0)
+
+    def test_ros2_defaults_use_native_head_left_camera(self):
+        args = ros2_parser().parse_args(["run"])
+        validate_ros2_args(args)
+        self.assertEqual(args.topic, DEFAULT_TOPIC)
+        self.assertEqual(args.camera_id, DEFAULT_CAMERA_ID)
+        self.assertEqual((args.preview_width, args.preview_height), (640, 352))
 
     def test_assignment_identity_isolated_by_attempt(self):
         first = {"execution_id": "execution-1", "attempt_id": "attempt-1"}
@@ -101,7 +112,7 @@ class RealSenseClientTests(unittest.TestCase):
         )
 
     def test_pipeline_phase_telemetry_contains_window_timestamps(self):
-        client = RealSenseMonitorClient.__new__(RealSenseMonitorClient)
+        client = MonitorClient.__new__(MonitorClient)
         client.http = FakeHttpClient()
         client.report_phase(
             {"execution_id": "execution-1", "attempt_id": "chain-session"},

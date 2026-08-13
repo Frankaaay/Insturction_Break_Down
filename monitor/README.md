@@ -18,10 +18,11 @@ python -m pip install -r monitor/requirements.txt
 Set-Location monitor
 ```
 
-The Windows RealSense uploader is `realsense_client.py`; its small, separate
-dependency set is in `requirements-realsense.txt`. See the repository root
-README for `probe` and continuous `run` commands. It uses RGB only and does not
-require ROS.
+The robot uploader is `ros2_camera_client.py`; camera-independent Monitor
+transport/state code lives in `camera_monitor_client.py`, while the ROS2 file
+only adapts `sensor_msgs/msg/Image`. Its small dependency set is in
+`requirements-ros2-camera.txt`. See the repository root README for `probe` and
+continuous `run` commands.
 
 Prototype for testing whether a vision-language model can monitor short robot
 manipulation clips and decide whether an atomic operation is on track,

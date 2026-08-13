@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Windows RealSense RGB client for the Planner Monitor server."""
+"""Camera-independent upload, preview, and assignment client for Planner Monitor."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import os
 import ssl
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -17,7 +18,7 @@ from urllib.parse import quote, urlsplit
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from dotenv import load_dotenv
@@ -28,37 +29,64 @@ def utc_iso(timestamp: float | None = None) -> str:
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def require_camera_modules():
+def require_common_modules():
     try:
         import numpy as np
-        import pyrealsense2 as rs
         from PIL import Image
     except ImportError as exc:
         raise RuntimeError(
-            "缺少 RealSense 客户端依赖，请运行: pip install -r monitor/requirements-realsense.txt"
+            "缺少相机客户端依赖，请运行: pip install -r monitor/requirements-ros2-camera.txt"
         ) from exc
-    return np, rs, Image
+    return np, Image
 
 
-def encode_mp4(frames: list[Any], output: Path, fps: int = 6) -> None:
+class FrameSource(Protocol):
+    """Minimal boundary between a camera transport and the Monitor pipeline."""
+
+    camera_id: str
+
+    def start(self) -> None: ...
+
+    def read(self, timeout_seconds: float) -> tuple[float, Any] | None: ...
+
+    def stop(self) -> None: ...
+
+
+def encode_mp4(
+    frames: list[Any], output: Path, fps: int = 6, ffmpeg: str = "ffmpeg",
+) -> None:
     if not frames:
         raise RuntimeError("没有可编码的视频帧")
-    try:
-        import imageio_ffmpeg
-    except ImportError as exc:
-        raise RuntimeError("缺少 imageio-ffmpeg") from exc
     height, width = frames[0].shape[:2]
-    writer = imageio_ffmpeg.write_frames(
-        str(output), (width, height), fps=fps, codec="libx264", pix_fmt_in="rgb24",
-        pix_fmt_out="yuv420p",
-        output_params=["-crf", "28", "-movflags", "+faststart", "-an"],
+    if width % 2 or height % 2:
+        raise RuntimeError(f"H.264 输入尺寸必须为偶数，当前为 {width}x{height}")
+    command = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s:v", f"{width}x{height}",
+        "-r", str(fps), "-i", "pipe:0", "-an", "-c:v", "libx264",
+        "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", str(output),
+    ]
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
-    writer.send(None)
     try:
         for frame in frames:
-            writer.send(frame.tobytes())
-    finally:
-        writer.close()
+            if frame.shape[:2] != (height, width):
+                raise RuntimeError("视频窗口中出现了不同尺寸的帧")
+            assert process.stdin is not None
+            process.stdin.write(frame.tobytes())
+        assert process.stdin is not None
+        process.stdin.close()
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        return_code = process.wait(timeout=30)
+    except Exception:
+        process.kill()
+        process.wait(timeout=5)
+        raise
+    if return_code:
+        raise RuntimeError(f"FFmpeg 编码失败: {stderr.decode('utf-8', 'replace').strip()}")
 
 
 def sample_window(buffer: deque, start: float, end: float, fps: int = 6) -> list[Any]:
@@ -248,9 +276,12 @@ class AssignmentPoller:
                 self._stop.wait(self.args.assignment_poll_seconds)
 
 
-class RealSenseMonitorClient:
-    def __init__(self, args: argparse.Namespace) -> None:
+class MonitorClient:
+    """Camera-independent Monitor state machine and server transport."""
+
+    def __init__(self, args: argparse.Namespace, source: FrameSource) -> None:
         self.args = args
+        self.source = source
         self.token = args.token or os.getenv("VISUAL_MONITOR_TOKEN", "")
         if not self.token:
             raise RuntimeError("请通过 --token 或 VISUAL_MONITOR_TOKEN 配置客户端令牌")
@@ -261,27 +292,10 @@ class RealSenseMonitorClient:
             verify=not args.insecure,
             trust_env=not args.no_proxy,
         )
-        self.np, self.rs, self.Image = require_camera_modules()
-
-    def open_camera(self):
-        pipeline = self.rs.pipeline()
-        config = self.rs.config()
-        if self.args.serial:
-            config.enable_device(self.args.serial)
-        config.enable_stream(self.rs.stream.color, 640, 480, self.rs.format.rgb8, 30)
-        profile = pipeline.start(config)
-        sensor = profile.get_device().first_color_sensor()
-        return pipeline, profile.get_device().get_info(self.rs.camera_info.serial_number), sensor
-
-    @staticmethod
-    def warm_up(pipeline, frame_count: int = 30) -> None:
-        """Let auto-exposure settle before recording a baseline or probe."""
-        for _ in range(frame_count):
-            pipeline.wait_for_frames(3000)
+        self.np, self.Image = require_common_modules()
 
     def capture_probe(self) -> dict[str, Any]:
-        pipeline, serial, _ = self.open_camera()
-        self.warm_up(pipeline)
+        self.source.start()
         started = time.perf_counter()
         capture_finished = started
         stop_ms = 0.0
@@ -289,27 +303,33 @@ class RealSenseMonitorClient:
         try:
             deadline = time.perf_counter() + self.args.window_seconds
             while time.perf_counter() < deadline:
-                color = pipeline.wait_for_frames(3000).get_color_frame()
-                if color:
-                    frames.append((time.time(), self.np.asanyarray(color.get_data()).copy()))
+                sample = self.source.read(min(1.0, max(0.05, deadline - time.perf_counter())))
+                if sample:
+                    frames.append(sample)
         finally:
             capture_finished = time.perf_counter()
             stop_started = time.perf_counter()
-            pipeline.stop()
+            self.source.stop()
             stop_ms = (time.perf_counter() - stop_started) * 1000
+        if not frames:
+            raise RuntimeError("ROS2 相机在 probe 期间没有提供任何画面")
         capture_ms = (capture_finished - started) * 1000
         selected = sample_window(deque(frames), frames[0][0], frames[-1][0], self.args.video_fps)
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
         try:
             encode_started = time.perf_counter()
-            encode_mp4(selected, video_path, self.args.video_fps)
+            encode_mp4(selected, video_path, self.args.video_fps, self.args.ffmpeg)
             encode_ms = (time.perf_counter() - encode_started) * 1000
             upload_started = time.perf_counter()
             with video_path.open("rb") as handle:
                 response = self.http.post(
                     "/api/visual-monitor/upload-probe",
-                    data={"camera_id": serial, "capture_ms": capture_ms, "encode_ms": encode_ms},
+                    data={
+                        "camera_id": self.source.camera_id,
+                        "capture_ms": capture_ms,
+                        "encode_ms": encode_ms,
+                    },
                     files={"video": ("window.mp4", handle, "video/mp4")},
                 )
             upload_ms = (time.perf_counter() - upload_started) * 1000
@@ -319,7 +339,9 @@ class RealSenseMonitorClient:
             result["frame_count_captured"] = len(frames)
             result["frame_count_uploaded"] = len(selected)
             result["local_file_bytes"] = video_path.stat().st_size
-            result["device_stop_ms"] = round(stop_ms, 1)
+            result["source_stop_ms"] = round(stop_ms, 1)
+            result["camera_id"] = self.source.camera_id
+            result["source_resolution"] = [int(frames[0][1].shape[1]), int(frames[0][1].shape[0])]
             return result
         finally:
             video_path.unlink(missing_ok=True)
@@ -382,7 +404,7 @@ class RealSenseMonitorClient:
                 window_started_at=window_start, window_ended_at=window_end,
             )
             encode_started = time.perf_counter()
-            encode_mp4(frames, video_path, self.args.video_fps)
+            encode_mp4(frames, video_path, self.args.video_fps, self.args.ffmpeg)
             now_payload = io.BytesIO()
             self.Image.fromarray(now_frame).save(
                 now_payload, format="JPEG", quality=82, optimize=True,
@@ -420,8 +442,8 @@ class RealSenseMonitorClient:
             video_path.unlink(missing_ok=True)
 
     def run(self) -> None:
-        pipeline, camera_id, _ = self.open_camera()
-        self.warm_up(pipeline)
+        self.source.start()
+        camera_id = self.source.camera_id
         ring: deque = deque()
         assignment = None
         generation = 0
@@ -439,11 +461,11 @@ class RealSenseMonitorClient:
         print(json.dumps({"event": "camera.ready", "camera_id": camera_id}, ensure_ascii=False))
         try:
             while True:
-                color = pipeline.wait_for_frames(3000).get_color_frame()
-                if not color:
+                sample = self.source.read(3.0)
+                if sample is None:
+                    print(json.dumps({"event": "camera.frame_timeout", "camera_id": camera_id}, ensure_ascii=False))
                     continue
-                now = time.time()
-                frame = self.np.asanyarray(color.get_data()).copy()
+                now, frame = sample
                 if now >= next_preview:
                     preview.offer(frame, now)
                     next_preview = now + 1.0 / self.args.preview_fps
@@ -526,33 +548,32 @@ class RealSenseMonitorClient:
         finally:
             preview.stop()
             poller.stop()
-            pipeline.stop()
+            self.source.stop()
             workers.shutdown(wait=True, cancel_futures=True)
             self.http.close()
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="RealSense visual monitor client")
+    result = argparse.ArgumentParser(description="ROS2 camera visual monitor client")
     result.add_argument("command", choices=["probe", "run"])
-    result.add_argument("--server", default="https://112.74.61.202")
+    result.add_argument("--server", default="http://127.0.0.1:8000")
     result.add_argument("--token")
-    result.add_argument("--serial")
     result.add_argument("--window-seconds", type=float, default=6.0)
     result.add_argument("--cycle-seconds", type=float, default=6.0)
     result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
-    result.add_argument("--preview-fps", type=float, default=3.0)
+    result.add_argument("--preview-fps", type=float, default=10.0)
     result.add_argument("--preview-width", type=int, default=640)
-    result.add_argument("--preview-height", type=int, default=480)
+    result.add_argument("--preview-height", type=int, default=352)
     result.add_argument("--preview-quality", type=int, default=65)
+    result.add_argument("--ffmpeg", default="/usr/bin/ffmpeg")
     result.add_argument("--http-timeout", type=float, default=30.0)
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")
     result.add_argument("--insecure", action="store_true", help="仅用于自签名证书测试")
     return result
 
 
-def main() -> int:
-    args = parser().parse_args()
+def validate_args(args: argparse.Namespace) -> None:
     if (
         args.window_seconds <= 0 or args.cycle_seconds <= 0
         or args.assignment_poll_seconds <= 0 or args.video_fps <= 0
@@ -561,17 +582,7 @@ def main() -> int:
         or not 1 <= args.preview_quality <= 95
     ):
         raise SystemExit("窗口、周期和视频 FPS 必须大于 0，实时预览 FPS 不能超过 10")
+
+
+def load_client_environment() -> None:
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-    client = RealSenseMonitorClient(args)
-    if args.command == "probe":
-        try:
-            print(json.dumps(client.capture_probe(), ensure_ascii=False, indent=2))
-        finally:
-            client.http.close()
-    else:
-        client.run()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
