@@ -18,6 +18,22 @@ from monitor.camera_monitor_client import (
 
 DEFAULT_TOPIC = "/camera/head_left/image_rect"
 DEFAULT_CAMERA_ID = "ros2.head_left.image_rect"
+DEFAULT_CROP_X = 160
+DEFAULT_CROP_Y = 92
+DEFAULT_CROP_WIDTH = 320
+DEFAULT_CROP_HEIGHT = 216
+
+
+def crop_frame(frame: Any, x: int, y: int, width: int, height: int) -> Any:
+    """Return one validated ROI without resizing or changing its pixels."""
+    source_height, source_width = frame.shape[:2]
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        raise RuntimeError("相机 ROI 的坐标必须非负，宽高必须大于 0")
+    if x + width > source_width or y + height > source_height:
+        raise RuntimeError(
+            f"相机 ROI {x},{y},{width},{height} 超出原图 {source_width}x{source_height}"
+        )
+    return frame[y:y + height, x:x + width].copy()
 
 
 def require_ros2_modules() -> tuple[Any, Any, Any, Any, Any]:
@@ -38,9 +54,17 @@ def require_ros2_modules() -> tuple[Any, Any, Any, Any, Any]:
 class Ros2ImageFrameSource:
     """Pull the newest RGB frame from one sensor_msgs/Image topic."""
 
-    def __init__(self, topic: str, camera_id: str) -> None:
+    def __init__(
+        self, topic: str, camera_id: str, *,
+        crop_x: int = DEFAULT_CROP_X, crop_y: int = DEFAULT_CROP_Y,
+        crop_width: int = DEFAULT_CROP_WIDTH, crop_height: int = DEFAULT_CROP_HEIGHT,
+    ) -> None:
         self.topic = topic
         self.camera_id = camera_id
+        self.crop_x = crop_x
+        self.crop_y = crop_y
+        self.crop_width = crop_width
+        self.crop_height = crop_height
         self._rclpy, bridge_type, self._qos, self._image_type, self._cv2 = require_ros2_modules()
         self._bridge = bridge_type()
         self._node: Any | None = None
@@ -67,6 +91,9 @@ class Ros2ImageFrameSource:
     def _on_image(self, message: Any) -> None:
         bgr = self._bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
         rgb = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2RGB)
+        rgb = crop_frame(
+            rgb, self.crop_x, self.crop_y, self.crop_width, self.crop_height,
+        )
         self._sequence += 1
         # Arrival wall time is used by the HTTP telemetry contract. The ROS
         # header clock may be simulated or configured independently.
@@ -99,6 +126,14 @@ def parser() -> ArgumentParser:
     result = common_parser()
     result.add_argument("--topic", default=DEFAULT_TOPIC)
     result.add_argument("--camera-id", default=DEFAULT_CAMERA_ID)
+    result.add_argument("--crop-x", type=int, default=DEFAULT_CROP_X)
+    result.add_argument("--crop-y", type=int, default=DEFAULT_CROP_Y)
+    result.add_argument("--crop-width", type=int, default=DEFAULT_CROP_WIDTH)
+    result.add_argument("--crop-height", type=int, default=DEFAULT_CROP_HEIGHT)
+    result.set_defaults(
+        preview_width=DEFAULT_CROP_WIDTH,
+        preview_height=DEFAULT_CROP_HEIGHT,
+    )
     return result
 
 
@@ -108,13 +143,23 @@ def validate_ros2_args(args: Namespace) -> None:
         raise SystemExit("ROS2 topic 必须是以 / 开头的绝对名称")
     if not args.camera_id or len(args.camera_id) > 128:
         raise SystemExit("camera-id 必须为1到128个字符")
+    if (
+        args.crop_x < 0 or args.crop_y < 0
+        or args.crop_width <= 0 or args.crop_height <= 0
+        or args.crop_width % 2 or args.crop_height % 2
+    ):
+        raise SystemExit("ROI 坐标必须非负，ROI 宽高必须为正偶数")
 
 
 def main() -> int:
     args = parser().parse_args()
     validate_ros2_args(args)
     load_client_environment()
-    source = Ros2ImageFrameSource(args.topic, args.camera_id)
+    source = Ros2ImageFrameSource(
+        args.topic, args.camera_id,
+        crop_x=args.crop_x, crop_y=args.crop_y,
+        crop_width=args.crop_width, crop_height=args.crop_height,
+    )
     client = MonitorClient(args, source)
     if args.command == "probe":
         try:

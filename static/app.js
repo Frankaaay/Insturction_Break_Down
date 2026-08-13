@@ -406,8 +406,11 @@ function visualMonitorControls(step, attempt, chainMode, visual) {
   const statusLabel = {
     in_progress: "执行中", succeeded: "已完成", failed: "已失败", unknown: "执行中",
   }[latest?.status] || (visual ? "等待首次判断" : "等待 ROS2 相机客户端");
+  const completionTimestamp = Number(latest?.completion_evidence_timestamp_s);
+  const completionTimestampLabel = Number.isFinite(completionTimestamp)
+    ? `完成证据 · ${completionTimestamp.toFixed(1)}s` : "完成证据";
   const evidenceImage = latest?.completion_evidence_url
-    ? `<img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧">` : "";
+    ? `<figure class="monitor-evidence-wrap"><img class="monitor-evidence" src="${esc(latest.completion_evidence_url)}" alt="完成证据帧"><figcaption>${esc(completionTimestampLabel)}</figcaption></figure>` : "";
   const evidenceItems = (latest?.evidence || []).map((item) =>
     `<li><span>${esc(Number(item.timestamp_s).toFixed(1))}s</span>${esc(item.observation)}</li>`
   ).join("");

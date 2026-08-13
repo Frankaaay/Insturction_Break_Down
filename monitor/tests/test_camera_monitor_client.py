@@ -2,13 +2,16 @@ import unittest
 from collections import deque
 import struct
 
+import numpy as np
+
 from monitor.camera_monitor_client import (
     LivePreviewSender, MonitorClient, assignment_identity,
     checkpoint_block_reason, parser, sample_fixed_window, sample_window,
     uploads_paused,
 )
 from monitor.ros2_camera_client import (
-    DEFAULT_CAMERA_ID, DEFAULT_TOPIC, parser as ros2_parser, validate_ros2_args,
+    DEFAULT_CAMERA_ID, DEFAULT_TOPIC, crop_frame,
+    parser as ros2_parser, validate_ros2_args,
 )
 
 
@@ -58,12 +61,29 @@ class CameraMonitorClientTests(unittest.TestCase):
     def test_preview_fps_parser_accepts_ten(self):
         self.assertEqual(parser().parse_args(["run", "--preview-fps", "10"]).preview_fps, 10.0)
 
-    def test_ros2_defaults_use_native_head_left_camera(self):
+    def test_ros2_defaults_use_confirmed_head_left_roi(self):
         args = ros2_parser().parse_args(["run"])
         validate_ros2_args(args)
         self.assertEqual(args.topic, DEFAULT_TOPIC)
         self.assertEqual(args.camera_id, DEFAULT_CAMERA_ID)
-        self.assertEqual((args.preview_width, args.preview_height), (640, 352))
+        self.assertEqual(
+            (args.crop_x, args.crop_y, args.crop_width, args.crop_height),
+            (160, 92, 320, 216),
+        )
+        self.assertEqual((args.preview_width, args.preview_height), (320, 216))
+
+    def test_ros2_roi_is_applied_without_resizing(self):
+        frame = np.arange(352 * 640 * 3, dtype=np.uint8).reshape(352, 640, 3)
+        cropped = crop_frame(frame, 160, 92, 320, 216)
+        self.assertEqual(cropped.shape, (216, 320, 3))
+        np.testing.assert_array_equal(cropped[0, 0], frame[92, 160])
+        np.testing.assert_array_equal(cropped[-1, -1], frame[307, 479])
+        self.assertFalse(np.shares_memory(cropped, frame))
+
+    def test_ros2_roi_rejects_area_outside_source_frame(self):
+        frame = np.zeros((352, 640, 3), dtype=np.uint8)
+        with self.assertRaisesRegex(RuntimeError, "超出原图"):
+            crop_frame(frame, 500, 100, 320, 216)
 
     def test_assignment_identity_isolated_by_attempt(self):
         first = {"execution_id": "execution-1", "attempt_id": "attempt-1"}

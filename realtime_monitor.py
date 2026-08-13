@@ -27,6 +27,7 @@ MAX_UPLOAD_BYTES = 3 * 1024 * 1024
 MONITOR_WINDOW_SECONDS = 6.0
 MONITOR_TIMESTAMP_MAX = MONITOR_WINDOW_SECONDS + 0.2
 MONITOR_SUCCESS_EVIDENCE_MIN = MONITOR_WINDOW_SECONDS - 1.0
+MONITOR_NOW_EVIDENCE_THRESHOLD = MONITOR_WINDOW_SECONDS - 0.05
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -358,15 +359,15 @@ class VisualMonitorService:
                 for item in result["step_updates"]:
                     completion = item.get("completion_evidence_timestamp_s")
                     if completion is not None:
-                        evidence_path = self.media_path(".jpg")
-                        await asyncio.to_thread(self._extract_frame, job["video_path"], evidence_path, float(completion))
-                        item["completion_evidence_url"] = f"/api/visual-monitor/media/{evidence_path.name}"
+                        item["completion_evidence_url"] = await self._completion_evidence_url(
+                            job["video_path"], job["now_path"], float(completion),
+                        )
             else:
                 completion = result.get("completion_evidence_timestamp_s")
                 if completion is not None:
-                    evidence_path = self.media_path(".jpg")
-                    await asyncio.to_thread(self._extract_frame, job["video_path"], evidence_path, float(completion))
-                    evidence_url = f"/api/visual-monitor/media/{evidence_path.name}"
+                    evidence_url = await self._completion_evidence_url(
+                        job["video_path"], job["now_path"], float(completion),
+                    )
             latest = {
                 **result,
                 "sequence": job["sequence"],
@@ -561,6 +562,21 @@ class VisualMonitorService:
             "normalization_applied": normalization_applied,
         }
 
+    async def _completion_evidence_url(
+        self, video_path: Path, now_path: Path, timestamp: float,
+    ) -> str:
+        # A six-second CFR video containing 36 frames at 6 FPS has its final
+        # decodable frame near 5.833s. NOW is the authoritative end-of-window
+        # image, so an API timestamp at the 6.0s boundary should use it instead
+        # of creating a URL for an FFmpeg seek that produced no file.
+        if timestamp >= MONITOR_NOW_EVIDENCE_THRESHOLD:
+            if not now_path.is_file() or now_path.stat().st_size == 0:
+                raise RuntimeError("NOW 完成证据图不存在或为空")
+            return f"/api/visual-monitor/media/{now_path.name}"
+        evidence_path = self.media_path(".jpg")
+        await asyncio.to_thread(self._extract_frame, video_path, evidence_path, timestamp)
+        return f"/api/visual-monitor/media/{evidence_path.name}"
+
     @staticmethod
     def _extract_frame(video_path: Path, output_path: Path, timestamp: float) -> None:
         try:
@@ -569,10 +585,16 @@ class VisualMonitorService:
         except ImportError as exc:
             raise RuntimeError("提取证据图需要 imageio-ffmpeg") from exc
         subprocess.run(
-            [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, timestamp - 0.05):.3f}", "-i", str(video_path), "-frames:v", "1", "-q:v", "3", "-y", str(output_path)],
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(video_path),
+                "-ss", f"{max(0.0, timestamp):.3f}", "-frames:v", "1", "-q:v", "3",
+                "-y", str(output_path),
+            ],
             check=True,
             capture_output=True,
         )
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"无法从视频的 {timestamp:.3f}s 提取完成证据帧")
 
     def cleanup_expired(self, *, force: bool = False) -> int:
         now = time.monotonic()

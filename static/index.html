@@ -369,7 +369,9 @@
   .pipeline-panel[data-phase="error"] .pipeline-progress i { background:var(--red); }
   .pipeline-panel[data-phase="completed"] .pipeline-progress i { background:var(--green); }
   .pipeline-stages { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 8px; color:var(--muted); font-size:9.5px; font-variant-numeric:tabular-nums; }
-  .monitor-evidence { width:100%; max-height:230px; object-fit:contain; margin-top:12px; border-radius:9px; background:#111; }
+  .monitor-evidence-wrap { margin:12px 0 0; overflow:hidden; border-radius:9px; background:#111; }
+  .monitor-evidence { display:block; width:100%; max-height:230px; object-fit:contain; background:#111; }
+  .monitor-evidence-wrap figcaption { padding:6px 9px; color:#d9deea; background:#171b24; font-size:10px; font-variant-numeric:tabular-nums; text-align:left; }
   .visual-success { margin-top:12px; padding:10px 12px; border-radius:9px; color:#087f58; background:#eaf8f2; text-align:left; font-size:11px; line-height:1.55; }
   .visual-success strong,.visual-failure strong { display:block; margin-bottom:4px; }
   .visual-success ul,.visual-failure ul,.event-text ul { margin:5px 0 0; padding-left:17px; }
@@ -471,6 +473,6 @@
   </main>
 </div>
 
-<script src="/app.js?v=monitor-result-log-20260811"></script>
+<script src="/app.js?v=completion-evidence-20260813"></script>
 </body>
 </html>

@@ -394,6 +394,65 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updates, [])
             self.assertEqual(successes[0]["latest"]["status"], "succeeded")
             self.assertEqual(successes[0]["latest"]["sequence"], 1)
+            self.assertEqual(
+                successes[0]["latest"]["completion_evidence_timestamp_s"], 5.2,
+            )
+            self.assertTrue(
+                successes[0]["latest"]["completion_evidence_url"].startswith(
+                    "/api/visual-monitor/media/"
+                )
+            )
+            await service.close()
+
+    async def test_end_boundary_completion_uses_now_image(self):
+        successes = []
+
+        async def update(**kwargs):
+            return {}
+
+        async def succeed(**kwargs):
+            successes.append(kwargs)
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = VisualMonitorService(
+                update, VisualMonitorConfig(Path(directory)), success_callback=succeed,
+            )
+
+            async def terminal(*args):
+                return ({
+                    "status": "succeeded",
+                    "description_zh": "水壶在窗口结尾仍位于目标桌面",
+                    "failure_reason": None,
+                    "evidence": [{"timestamp_s": 6.0, "observation": "水壶稳定留在桌面"}],
+                    "completion_evidence_timestamp_s": 6.0,
+                }, {"bailian_total": 10.0}, "qwen3.7-plus", "{}")
+
+            service._call_bailian = terminal
+            service._extract_frame = lambda *args: self.fail("6.0s 应直接使用 NOW")
+            baseline = Path(directory) / "before.jpg"
+            video = Path(directory) / "window.mp4"
+            now = Path(directory) / "now.jpg"
+            baseline.write_bytes(b"image")
+            video.write_bytes(b"video")
+            now.write_bytes(b"now")
+            await service.submit(
+                assignment={
+                    "execution_id": "e", "attempt_id": "a", "action_id": "A_002",
+                    "logic": 1, "slots": {"obj_a": "水壶", "sur_a": "桌子"},
+                },
+                camera_id="c", sequence=1, baseline_path=baseline,
+                video_path=video, now_path=now, client_timings={},
+            )
+            for _ in range(50):
+                if not service.in_flight:
+                    break
+                import asyncio
+                await asyncio.sleep(0.01)
+            self.assertEqual(
+                successes[0]["latest"]["completion_evidence_url"],
+                f"/api/visual-monitor/media/{now.name}",
+            )
             await service.close()
 
     async def test_chain_result_uses_chain_callback(self):

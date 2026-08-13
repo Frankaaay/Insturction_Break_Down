@@ -136,7 +136,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
-        self.assertIn("/app.js?v=monitor-result-log-20260811", index)
+        self.assertIn("/app.js?v=completion-evidence-20260813", index)
         script = (await self.client.get("/app.js")).text
         self.assertNotIn("人工确认成功", script)
         self.assertIn("VLM 判定成功后将自动进入下一步骤", script)

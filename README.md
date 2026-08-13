@@ -53,40 +53,214 @@ python server.py            # 监听 0.0.0.0:8000
 
 ### ROS2 Camera Visual Monitor
 
-机器人ARM使用ROS2 Humble订阅头部相机。创建能看到系统ROS包的虚拟环境，再安装独立采集依赖：
+这一分支用于机器人本体部署。Web/VLM 服务端和 ROS2 相机客户端位于同一仓库、
+同一台 ARM，但保持为两个独立进程；底盘只负责把 ARM 的 Web 端口转发到办公
+局域网：
+
+```text
+浏览器 ── http://192.168.51.168:8000 ──> 底盘 SSH 转发
+                                                │
+                                                v
+ARM 127.0.0.1:8000  ── planner-monitor-web.service
+ARM ROS2 topic       ── planner-monitor-ros2-camera.service
+                           └─ /camera/head_left/image_rect
+```
+
+当前验证过的环境是 ROS2 Humble、Python 3、FFmpeg，以及头部左相机原生
+`640×352` BGR8 图像。客户端默认从原图裁取 `x=160..480、y=92..308` 的
+`320×216` 中央操作区域；BEFORE、6 秒视频、NOW 和实时预览使用完全相同的
+ROI。下面的命令都从仓库根目录执行。
+
+#### 1. 在 ARM 安装代码和依赖
+
+从底盘进入 ARM，检出专用分支：
 
 ```bash
+ssh root@192.168.51.168
+ssh arm
+
+mkdir -p /root/workspace
+cd /root/workspace
+git clone https://github.com/Frankaaay/planner_monitor.git planner_monitor
+cd planner_monitor
+git switch frank/ros2-camera-monitor
+git pull --ff-only origin frank/ros2-camera-monitor
+```
+
+如果仓库已经存在，只执行最后三行。安装系统编码器，并创建能够读取系统 ROS2
+Python 包的虚拟环境：
+
+```bash
+apt-get update
+apt-get install -y ffmpeg python3-venv
+
+cd /root/workspace/planner_monitor
 python3 -m venv --system-site-packages .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -r monitor/requirements-ros2-camera.txt
-sudo apt-get install ffmpeg
 ```
 
-服务器 `.env` 至少配置 `DASHSCOPE_API_KEY` 和 `VISUAL_MONITOR_TOKEN`。采集客户端只读取同一个 monitor token，不保存百炼 key。先测6秒视频的采集、编码和上传链路（不会请求百炼）：
+`--system-site-packages` 不能省略，否则虚拟环境通常找不到系统安装的 `rclpy`、
+`sensor_msgs` 和 `cv_bridge`。
+
+#### 2. 配置 ARM 环境变量
+
+在 `/root/workspace/planner_monitor/.env` 中配置：
+
+```dotenv
+DASHSCOPE_API_KEY=填入百炼北京地域的Key
+VISUAL_MONITOR_TOKEN=服务端和相机客户端共享的随机Token
+
+# 可选；设置后网页控制操作也需要该Token
+# OPERATOR_TOKEN=另一个随机Token
+
+VISUAL_MONITOR_MODEL=qwen3.7-plus
+VISUAL_MONITOR_RETENTION_HOURS=24
+VISUAL_MONITOR_MAX_CONCURRENCY=1
+```
+
+不要提交 `.env`。`DASHSCOPE_API_KEY` 只由 Web/VLM 服务读取；相机客户端只需
+`VISUAL_MONITOR_TOKEN`。部署在同一台 ARM 时，客户端默认连接
+`http://127.0.0.1:8000`，无需经过底盘或公网。
+
+#### 3. 验证 ROS2 相机
+
+先确认 topic、类型、编码和分辨率：
 
 ```bash
 source /opt/ros/humble/setup.bash
-.venv/bin/python -m monitor.ros2_camera_client probe
+ros2 topic list | grep /camera/head_left/image_rect
+ros2 topic type /camera/head_left/image_rect
+ros2 topic hz /camera/head_left/image_rect
+ros2 topic echo --once /camera/head_left/image_rect | sed -n '1,20p'
 ```
 
-客户端会自动读取仓库根目录中被 Git 忽略的 `.env`；也可以用环境变量或
-`--token` 显式覆盖 `VISUAL_MONITOR_TOKEN`。
+预期 topic 类型为 `sensor_msgs/msg/Image`，当前实机图像为 BGR8、`640×352`。
+如果机器人还需要额外 workspace 才能发现 topic，应在 `source
+/opt/ros/humble/setup.bash` 后继续 source 该 workspace 的 `install/setup.bash`，
+并把同样的 source 命令加入相机 systemd unit 的 `ExecStart`。
 
-如果代理规则还没将服务器设为直连，可临时加 `--no-proxy`；如果服务器使用不受信任的测试证书才加 `--insecure`。输出分别包含 `capture_ms`、`encode_ms`、`client_upload_roundtrip_ms`、`server_write_ms`、帧数和 MP4 大小。
+#### 4. 启动 Web 服务并运行只上传 probe
 
-正式监控：网页生成计划后选择“原子视觉”或“整链视觉”并开始，再运行：
+先手工启动 Web 服务：
 
 ```bash
-source /opt/ros/humble/setup.bash
-.venv/bin/python -m monitor.ros2_camera_client run
+cd /root/workspace/planner_monitor
+.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-机器人部署中，Web服务运行在ARM的`127.0.0.1:8000`，底盘通过SSH本地端口转发将其暴露为局域网地址`http://192.168.51.168:8000`。对应systemd模板位于`deploy/planner-monitor-web.service`、`deploy/planner-monitor-ros2-camera.service`和`deploy/planner-monitor-lan-forward.service`。首次接入先运行`probe`验证ROS订阅、6秒窗口编码和HTTP上传；probe成功后才启用持续相机服务。
+另开一个 ARM 终端运行 probe。它采集完整 6 秒、编码 36 帧 H.264 MP4并上传，
+但不会调用百炼：
 
-客户端默认订阅 `/camera/head_left/image_rect`，保留相机原生 `640×352` 画面；VLM视频降采样为6 FPS、H.264 CRF 28，每积累完整6秒便提交这6秒窗口，默认窗口和提交周期均为6秒。独立线程每1秒领取一次当前 assignment，编码和上传也在线程中进行，因此ROS回调不会等待网络。每次切换步骤都会生成新的generation、清空旧帧、重拍BEFORE并重新积累完整6秒窗口；旧generation的上传结果会被忽略。如果检查点到期时百炼仍在推理或本地上传槽繁忙，客户端每0.5秒重试并使用最新滚动窗口。VLM返回`succeeded`时后端自动推进；返回`failed`时暂停等待人工确认。
+```bash
+cd /root/workspace/planner_monitor
+source /opt/ros/humble/setup.bash
+.venv/bin/python -m monitor.ros2_camera_client probe --no-proxy
+```
+
+输出应包含 `source_resolution=[320,216]`、`frame_count_captured`、
+`frame_count_uploaded=36`、`capture_ms`、`encode_ms`、
+`client_upload_roundtrip_ms`、`server_write_ms` 和 `local_file_bytes`。当前实机基线
+输入是从原生 `640×352` 裁取的 `320×216` ROI、6 FPS、6 秒；`capture_ms` 应
+接近 6000 ms。`--no-proxy` 只表示
+Python HTTP 客户端忽略 `HTTP_PROXY/HTTPS_PROXY`，不会改变 ROS2 或底盘转发。
+
+#### 5. 安装 ARM systemd 服务
+
+probe 成功后安装服务模板：
+
+```bash
+cd /root/workspace/planner_monitor
+mkdir -p /root/.ros/log/planner-monitor
+install -m 0644 deploy/planner-monitor-web.service /etc/systemd/system/
+install -m 0644 deploy/planner-monitor-ros2-camera.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now planner-monitor-web.service
+systemctl enable --now planner-monitor-ros2-camera.service
+```
+
+检查实际进程、分支、提交和日志：
+
+```bash
+cd /root/workspace/planner_monitor
+git branch --show-current
+git rev-parse HEAD
+systemctl --no-pager --full status planner-monitor-web.service
+systemctl --no-pager --full status planner-monitor-ros2-camera.service
+journalctl -u planner-monitor-web.service -n 100 --no-pager
+journalctl -u planner-monitor-ros2-camera.service -n 100 --no-pager
+```
+
+#### 6. 在底盘暴露局域网端口
+
+退出到 `root@192.168.51.168` 底盘终端，确认 `ssh arm` 已能免密登录，再安装
+转发服务：
+
+```bash
+scp arm:/root/workspace/planner_monitor/deploy/planner-monitor-lan-forward.service /tmp/planner-monitor-lan-forward.service
+install -m 0644 /tmp/planner-monitor-lan-forward.service /etc/systemd/system/planner-monitor-lan-forward.service
+systemctl daemon-reload
+systemctl enable --now planner-monitor-lan-forward.service
+systemctl --no-pager --full status planner-monitor-lan-forward.service
+ss -lntp | grep 192.168.51.168:8000
+```
+
+模板文件来自仓库的 `deploy/planner-monitor-lan-forward.service`。浏览器随后访问：
+
+```text
+http://192.168.51.168:8000
+```
+
+页面创建计划后选择“原子视觉”或“整链视觉”并开始。相机服务会自动领取
+assignment，无需再手工运行客户端。
+
+#### 7. 更新、回滚前检查和常用诊断
+
+更新当前分支时先记录提交，再快进拉取并重启两个 ARM 服务：
+
+```bash
+cd /root/workspace/planner_monitor
+git status --short
+git rev-parse HEAD
+git pull --ff-only origin frank/ros2-camera-monitor
+systemctl restart planner-monitor-web.service planner-monitor-ros2-camera.service
+systemctl is-active planner-monitor-web.service planner-monitor-ros2-camera.service
+```
+
+局域网打不开时依次检查 ARM Web 服务、底盘转发和浏览器入口；有画面但不触发
+VLM 时检查相机客户端的 assignment 与 checkpoint 日志：
+
+```bash
+# ARM
+curl -fsS http://127.0.0.1:8000/api/providers
+journalctl -u planner-monitor-ros2-camera.service -f
+
+# 底盘
+curl -fsS http://192.168.51.168:8000/api/providers
+journalctl -u planner-monitor-lan-forward.service -n 100 --no-pager
+```
+
+首次接入或修改相机参数后，应重新执行 probe，再恢复持续相机服务。
+
+客户端默认订阅 `/camera/head_left/image_rect`，从相机原生 `640×352` 图像裁取
+`--crop-x 160 --crop-y 92 --crop-width 320 --crop-height 216`。裁切发生在统一
+采集入口，不做放大，因此 BEFORE、VLM 视频、NOW 和实时预览不会出现范围不一致。
+修改 ROI 后必须重新运行 probe；ROI 必须位于原图内，宽高必须为偶数。VLM 视频
+降采样为6 FPS、H.264 CRF 28，每积累完整6秒便提交这6秒窗口，默认窗口和提交
+周期均为6秒。独立线程每1秒领取一次当前 assignment，编码和上传也在线程中进行，
+因此ROS回调不会等待网络。每次切换步骤都会生成新的generation、清空旧帧、重拍
+BEFORE并重新积累完整6秒窗口；旧generation的上传结果会被忽略。如果检查点到期
+时百炼仍在推理或本地上传槽繁忙，客户端每0.5秒重试并使用最新滚动窗口。VLM返回
+`succeeded`时后端自动推进；返回`failed`时暂停等待人工确认。
 
 整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端已确认步骤、当前及后续未完成步骤，以及上一窗口的逐步骤观察摘要。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。第一个窗口没有完成的动作可以在后续窗口继续判断，已确认成功的步骤进入跨窗口账本且不会回退。上一窗口摘要只作时序参考，不能替代当前窗口证据。中间步骤可在窗口内短暂完成后继续下一步，最终步骤仍必须在 NOW 中成立。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
 
-同一采集循环还会分出独立实时预览：目标上限为10 FPS、640×352、JPEG quality 65，通过二进制WebSocket上传，不使用Base64；实际FPS不会超过ROS2相机真实发布频率。服务端和每个网页订阅者都只保留最新一帧，慢连接覆盖旧帧，不会阻塞相机或VLM。网页显示最近2秒实际收到的预览FPS和采集到展示的延迟。VLM进入等待人工确认后，6秒窗口和百炼请求暂停，但实时预览继续。
+同一采集循环还会分出独立实时预览：目标上限为10 FPS、默认 `320×216` ROI、
+JPEG quality 65，通过二进制WebSocket上传，不使用Base64；实际FPS不会超过ROS2
+相机真实发布频率。服务端和每个网页订阅者都只保留最新一帧，慢连接覆盖旧帧，
+不会阻塞相机或VLM。网页显示最近2秒实际收到的预览FPS和采集到展示的延迟。
+VLM进入等待人工确认后，6秒窗口和百炼请求暂停，但实时预览继续。
 
 每个 VLM 检查点上传 `BEFORE`、6 秒 H.264 视频和独立 `NOW` 结尾帧。状态以 NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后 1 秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
 
