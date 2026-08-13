@@ -296,6 +296,15 @@ class MonitorClient:
 
     def capture_probe(self) -> dict[str, Any]:
         self.source.start()
+        discovery_started = time.perf_counter()
+        first = self.source.read(self.args.http_timeout)
+        discovery_ms = (time.perf_counter() - discovery_started) * 1000
+        if first is None:
+            self.source.stop()
+            raise RuntimeError("ROS2 相机在等待首帧期间没有提供画面")
+        # The first frame proves DDS discovery is complete but is intentionally
+        # excluded. The six-second probe window starts from the next frame.
+        window_started_at = time.time()
         started = time.perf_counter()
         capture_finished = started
         stop_ms = 0.0
@@ -314,7 +323,9 @@ class MonitorClient:
         if not frames:
             raise RuntimeError("ROS2 相机在 probe 期间没有提供任何画面")
         capture_ms = (capture_finished - started) * 1000
-        selected = sample_window(deque(frames), frames[0][0], frames[-1][0], self.args.video_fps)
+        selected = sample_fixed_window(
+            deque(frames), window_started_at, self.args.window_seconds, self.args.video_fps,
+        )
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
         try:
@@ -340,6 +351,7 @@ class MonitorClient:
             result["frame_count_uploaded"] = len(selected)
             result["local_file_bytes"] = video_path.stat().st_size
             result["source_stop_ms"] = round(stop_ms, 1)
+            result["source_discovery_ms"] = round(discovery_ms, 1)
             result["camera_id"] = self.source.camera_id
             result["source_resolution"] = [int(frames[0][1].shape[1]), int(frames[0][1].shape[0])]
             return result
@@ -571,6 +583,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")
     result.add_argument("--insecure", action="store_true", help="仅用于自签名证书测试")
     return result
+
+
+def sample_fixed_window(
+    buffer: deque, start: float, duration_seconds: float, fps: int = 6,
+) -> list[Any]:
+    """Return exactly duration*fps frames after camera discovery is complete."""
+    selected = sample_window(buffer, start, start + duration_seconds, fps)
+    expected = max(1, round(duration_seconds * fps))
+    if selected and len(selected) != expected:
+        raise RuntimeError(f"视频窗口应为 {expected} 帧，实际为 {len(selected)} 帧")
+    return selected
 
 
 def validate_args(args: argparse.Namespace) -> None:

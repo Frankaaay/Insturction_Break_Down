@@ -4,7 +4,8 @@ import struct
 
 from monitor.camera_monitor_client import (
     LivePreviewSender, MonitorClient, assignment_identity,
-    checkpoint_block_reason, parser, sample_window, uploads_paused,
+    checkpoint_block_reason, parser, sample_fixed_window, sample_window,
+    uploads_paused,
 )
 from monitor.ros2_camera_client import (
     DEFAULT_CAMERA_ID, DEFAULT_TOPIC, parser as ros2_parser, validate_ros2_args,
@@ -131,6 +132,14 @@ class CameraMonitorClientTests(unittest.TestCase):
             for index in range(181)
         )
         selected = sample_window(frames, 0.0, 6.0, fps=6)
+        self.assertEqual(len(selected), 36)
+
+    def test_probe_window_is_full_length_after_discovery_delay(self):
+        frames = deque(
+            (100.2 + index / 8, index)
+            for index in range(48)
+        )
+        selected = sample_fixed_window(frames, 100.0, 6.0, fps=6)
         self.assertEqual(len(selected), 36)
 
     def test_empty_window_returns_no_frames(self):
