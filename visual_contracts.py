@@ -148,15 +148,15 @@ def _temporal_rule(contract: ActionVisualContract) -> str:
     rules = {
         "transition_or_state": (
             "transition_or_state：既可由 WINDOW 中直接可见的状态变化证明，也可由 CURRENT_NOW 中仍清晰成立的持久结果证明；"
-            "如果变化跨越窗口边界，用 PREV_NOW 与 WINDOW 开头连接判断。"
+            "如果变化发生在前一窗口但当前结果仍明确成立，以 CURRENT_NOW 的直接可见状态判断。"
         ),
         "transition_event": (
-            "transition_event：必须在本次 WINDOW 中看到明确位移/变化事件；PREV_NOW 只用于建立本段开始前的参照，"
+            "transition_event：必须在本次 WINDOW 中看到明确位移/变化事件；"
             "不能仅凭 CURRENT_NOW 的静态握持状态推断已经搬运。"
         ),
         "persistent_state": (
             "persistent_state：CURRENT_NOW 中明确成立的稳定最终关系足以证明成功，即使释放动作发生在更早窗口；"
-            "WINDOW 和 PREV_NOW 用于排除短暂接触、掉落或错误目标。"
+            "WINDOW、CHAIN_BEFORE 和已确认前置 Step 的成功关键帧用于核对目标身份并排除短暂接触、掉落或错误目标。"
         ),
     }
     return rules[contract.temporal_mode]
@@ -181,7 +181,7 @@ def build_monitor_prompt(
     slot_text = "，".join(f"{name}={slots[name]}" for name in contract.required_slots)
     duration = _duration_text(window_duration_s)
     tail_start = _duration_text(max(0.0, window_duration_s - 1.0))
-    return f"""你是实时视觉观察器。只基于给出的本步骤 CHAIN_BEFORE 初始图、PREV_NOW、随后 {duration} 秒连续视频和窗口结尾 CURRENT_NOW 图，判断当前原子操作在检查点结束时的视觉状态。
+    return f"""你是实时视觉观察器。只基于给出的本步骤 BEFORE 初始图、随后 {duration} 秒连续视频和窗口结尾 CURRENT_NOW 图，判断当前原子操作在检查点结束时的视觉状态。
 
 动作：{contract.name}（{contract.contract_key}，contract v{contract.version}）
 操作描述：{assignment.get('zh') or assignment.get('action') or contract.name}
@@ -190,7 +190,6 @@ def build_monitor_prompt(
 上一次状态：{assignment.get('previous_status') or '无'}（只作为时序参考，本次仍以直接可见证据为准）
 
 时间语义：{_temporal_rule(contract)}
-PREV_NOW 是上一段已提交窗口的结尾图。本段与上一段有约 1 秒重叠；它只连接视觉时间轴，不携带上一轮自由文本结论。
 
 {HUMAN_OPERATOR_CONTEXT}
 
@@ -227,6 +226,12 @@ def build_chain_monitor_prompt(
     steps = assignment.get("steps") or []
     if not steps:
         raise ValueError("整链 Visual Monitor 缺少步骤")
+    confirmed_ids = {
+        item["step_id"] for item in assignment.get("confirmed_steps", [])
+        if item.get("status") == "succeeded"
+    }
+    current_index = int(assignment.get("current_step_index", 0))
+    current_step_id = assignment.get("current_step_id") or steps[current_index]["step_id"]
     rendered_steps: list[str] = []
     for index, step in enumerate(steps, start=1):
         action_id = step.get("action_id")
@@ -239,10 +244,16 @@ def build_chain_monitor_prompt(
         if missing:
             raise ValueError(f"动作契约缺少 slots: {', '.join(missing)}")
         slot_text = "，".join(f"{name}={slots[name]}" for name in contract.required_slots)
+        backend_status = (
+            "succeeded（后端权威、不可回退）" if step["step_id"] in confirmed_ids
+            else "current（本轮首先判断）" if step["step_id"] == current_step_id
+            else "pending（仅当前序步骤 succeeded 后才可判断）"
+        )
         rendered_steps.append(f"""步骤 {index} / step_id={step['step_id']}
 动作：{contract.name}（{contract.contract_key}，contract v{contract.version}）
 描述：{step.get('zh') or step.get('action') or contract.name}
 参数：{slot_text}
+后端状态：{backend_status}
 时间语义：{_temporal_rule(contract)}
 succeeded 判据：
 {_bullets(contract.succeeded)}
@@ -252,10 +263,9 @@ failed 边界：
 {_bullets(contract.failed)}""")
 
     ledger = assignment.get("confirmed_steps") or []
-    current_index = int(assignment.get("current_step_index", 0))
     pending_ids = [step["step_id"] for step in steps[current_index:]]
     ledger_text = "、".join(
-        f"{item['step_id']}=succeeded" for item in ledger
+        f"{item['step_id']}=succeeded（已附带唯一冻结成功关键帧）" for item in ledger
     ) or "无"
     unfinished = assignment.get("unfinished_steps") or [
         {"step_id": step["step_id"]} for step in steps[current_index:]
@@ -270,6 +280,7 @@ failed 边界：
 
 原始指令：{assignment.get('instruction') or '未提供'}
 检查点序号：{sequence}
+当前执行 Step：step_id={current_step_id}，步骤序号={current_index + 1}
 
 后端已经确认且不可回退的步骤：
 {ledger_text}
@@ -277,7 +288,7 @@ failed 边界：
 当前及后续未完成步骤：
 {unfinished_text}
 
-视觉输入按 CHAIN_BEFORE、PREV_NOW、WINDOW、CURRENT_NOW 排列。PREV_NOW 是上一段已提交窗口的结尾图，本段与上一段约有 1 秒重叠。不要依赖或复述上一窗口的自由文本结论，必须用 PREV_NOW 与本次 WINDOW 连接跨窗口动作。
+视觉输入严格按 CHAIN_BEFORE、每个已确认前置 Step 的一张 HISTORY_STEP_KEYFRAME、唯一的 CURRENT_WINDOW 视频、CURRENT_NOW 排列。不存在任何历史视频。每张 HISTORY_STEP_KEYFRAME 只证明与其绑定的 Step 已由后端确认成功，不要求用当前视频重新看到该动作。
 
 {HUMAN_OPERATOR_CONTEXT}
 
@@ -287,7 +298,9 @@ failed 边界：
 - 只评估尚未由后端确认的步骤。step_updates 必须从当前步骤开始，按顺序返回未确认后缀 {pending_ids} 的连续前缀。
 - 一旦遇到第一个 in_progress 或 failed 就停止输出，不要再为更后面的尚未执行步骤生成占位结果。只有前面的步骤都 succeeded 才能继续输出下一步。
 - 不得重复输出已确认步骤，也不得跳步、自行重新拆解、改名或重排步骤。
-- 后端步骤账本只说明哪些步骤已经被确认，不提供上一窗口自由文本观察；必须结合 PREV_NOW、本次 WINDOW 和 CURRENT_NOW 更新判断。
+- 后端标记 succeeded 的历史 Step 是权威事实，并有对应冻结关键帧；不得重新判断、否认或回退，也不得在 description_zh、failure_reason 或 evidence 中声称这些前置 Step 尚未完成。
+- 只从当前执行 Step 开始判断。当前为 Place 时，如果 Pick/Carry 已由后端确认，禁止回答“尚未拿起”“尚未搬运”或语义等价内容；只判断目标物是否已经稳定位于指定表面、是否仍由手支撑、表面身份是否可确认。
+- Place 是 persistent_state：即使放置/释放过程发生在上一窗口，只要 CURRENT_NOW 能确认指定目标物稳定留在指定 sur_a 且手已不再支撑，就必须判定 Place succeeded；不要求当前视频重新出现释放动作。
 - succeeded：视频中有直接证据表明该步骤完成。中间步骤只需在窗口内真实发生过，不要求其后置条件保持到 NOW；例如 Pick 后继续 Carry/Place，Pick 仍可 succeeded。
 - 最后一个步骤以及代表整个任务完成的状态必须在窗口结尾 NOW 仍明确成立；中途成立但 NOW 已撤销，不能判最终成功。
 - in_progress：该步骤正在执行、尚未完成，或者因遮挡、画质、物体身份等原因暂时无法确认；description_zh 必须写明具体原因。可恢复的抓空、滑脱、掉落后继续尝试属于 in_progress。

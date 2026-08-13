@@ -353,6 +353,45 @@ class VisualMonitorService:
         path.write_bytes(data)
         return path, len(data), (time.perf_counter() - started) * 1000
 
+    def _history_keyframe_content(
+        self, assignment: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], int]:
+        if assignment.get("monitor_scope") != "chain":
+            return [], 0
+        steps_by_id = {step["step_id"]: step for step in assignment.get("steps", [])}
+        media_prefix = "/api/visual-monitor/media/"
+        content: list[dict[str, Any]] = []
+        count = 0
+        for confirmed in assignment.get("confirmed_steps", []):
+            keyframe_url = confirmed.get("success_keyframe_url")
+            if not isinstance(keyframe_url, str) or not keyframe_url.startswith(media_prefix):
+                raise RuntimeError(f"已确认步骤缺少成功关键帧: {confirmed.get('step_id')}")
+            filename = keyframe_url[len(media_prefix):]
+            if not filename or Path(filename).name != filename:
+                raise RuntimeError("成功关键帧 URL 非法")
+            keyframe_path = self.config.storage_root / filename
+            if not keyframe_path.is_file() or keyframe_path.stat().st_size == 0:
+                raise RuntimeError(f"已确认步骤成功关键帧不存在: {confirmed.get('step_id')}")
+            keyframe_data = base64.b64encode(keyframe_path.read_bytes()).decode("ascii")
+            step = steps_by_id.get(confirmed.get("step_id"), {})
+            evidence_observation = confirmed.get("success_evidence_observation")
+            evidence_text = (
+                f"冻结证据说明={evidence_observation}。"
+                if isinstance(evidence_observation, str) and evidence_observation.strip()
+                else ""
+            )
+            content.extend([
+                {"type": "text", "text": (
+                    f"HISTORY_STEP_KEYFRAME：step_id={confirmed.get('step_id')}，"
+                    f"步骤={step.get('zh') or step.get('action') or '未命名'}，"
+                    "后端权威状态=succeeded。该图是此 Step 唯一且冻结的成功关键帧；"
+                    f"{evidence_text}不得重新判断、否认或回退该 Step。"
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{keyframe_data}"}},
+            ])
+            count += 1
+        return content, count
+
     async def submit(
         self,
         *,
@@ -363,7 +402,6 @@ class VisualMonitorService:
         video_path: Path,
         now_path: Path,
         client_timings: dict[str, float],
-        prev_now_path: Path | None = None,
         window_duration_s: float = MONITOR_WINDOW_SECONDS,
         window_started_at: str | None = None,
         window_ended_at: str | None = None,
@@ -378,7 +416,6 @@ class VisualMonitorService:
                 sequence=sequence,
                 baseline_path=baseline_path,
                 video_path=video_path,
-                prev_now_path=prev_now_path or baseline_path,
                 now_path=now_path,
                 window_duration_s=window_duration_s,
                 window_started_at=window_started_at,
@@ -400,7 +437,7 @@ class VisualMonitorService:
         }
         try:
             call_result = await self._call_bailian(
-                assignment, job["sequence"], job["baseline_path"], job["prev_now_path"],
+                assignment, job["sequence"], job["baseline_path"],
                 job["video_path"], job["now_path"], job["window_duration_s"],
             )
             if len(call_result) == 4:
@@ -435,6 +472,7 @@ class VisualMonitorService:
                 "window_duration_s": job["window_duration_s"],
                 "window_started_at": job["window_started_at"],
                 "window_ended_at": job["window_ended_at"],
+                "history_keyframe_count": response_diagnostics.get("history_keyframe_count", 0),
                 "completion_evidence_url": evidence_url,
                 "timings_ms": {
                     **job["client_timings"],
@@ -537,17 +575,16 @@ class VisualMonitorService:
 
     async def _call_bailian(
         self, assignment: dict[str, Any], sequence: int, baseline_path: Path,
-        prev_now_path: Path, video_path: Path, now_path: Path,
-        window_duration_s: float,
+        video_path: Path, now_path: Path, window_duration_s: float,
     ) -> tuple[dict[str, Any], dict[str, float], str, str, dict[str, Any]]:
         key = os.getenv("DASHSCOPE_API_KEY", "")
         if not key:
             raise RuntimeError("服务器未配置 DASHSCOPE_API_KEY")
         prep_started = time.perf_counter()
         baseline_data = base64.b64encode(baseline_path.read_bytes()).decode("ascii")
-        prev_now_data = base64.b64encode(prev_now_path.read_bytes()).decode("ascii")
         video_data = base64.b64encode(video_path.read_bytes()).decode("ascii")
         now_data = base64.b64encode(now_path.read_bytes()).decode("ascii")
+        historical_content, history_keyframe_count = self._history_keyframe_content(assignment)
         prep_ms = (time.perf_counter() - prep_started) * 1000
         chain_mode = assignment.get("monitor_scope") == "chain"
         output_schema = output_schema_for_window(window_duration_s, chain_mode=chain_mode)
@@ -565,10 +602,9 @@ class VisualMonitorService:
             "model": self.config.model,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
-                {"type": "text", "text": "BEFORE：本次整条操作链开始前的初始画面。" if chain_mode else "BEFORE：本原子操作开始前的初始画面。"},
+                {"type": "text", "text": "CHAIN_BEFORE：本次整条操作链开始前的初始画面。" if chain_mode else "BEFORE：本原子操作开始前的初始画面。"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{baseline_data}"}},
-                {"type": "text", "text": "PREV_NOW：上一段已提交窗口的结尾画面；它与本段开头附近有重叠，用于连接跨窗口动作。"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{prev_now_data}"}},
+                *historical_content,
                 {"type": "text", "text": f"WINDOW：连续时间轴上的本段 {window_duration_s:.3f} 秒视频。"},
                 {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
                 {"type": "text", "text": "NOW：检查点结束时的当前画面；最终状态必须以此画面为准。"},
@@ -639,6 +675,7 @@ class VisualMonitorService:
             "model_content": content,
             "normalized_json": normalized,
             "normalization_applied": normalization_applied,
+            "history_keyframe_count": history_keyframe_count,
         }
 
     async def _completion_evidence_url(

@@ -68,7 +68,7 @@ ARM ROS2 topic       ── planner-monitor-ros2-camera.service
 
 当前验证过的环境是 ROS2 Humble、Python 3、FFmpeg，以及头部左相机原生
 `640×352` BGR8 图像。客户端默认从原图裁取 `x=160..480、y=92..308` 的
-`320×216` 中央操作区域；CHAIN_BEFORE、动态视频、PREV_NOW、CURRENT_NOW 和实时预览使用完全相同的
+`320×216` 中央操作区域；CHAIN_BEFORE、动态视频、CURRENT_NOW 和实时预览使用完全相同的
 ROI。下面的命令都从仓库根目录执行。
 
 #### 1. 在 ARM 安装代码和依赖
@@ -248,11 +248,11 @@ journalctl -u planner-monitor-lan-forward.service -n 100 --no-pager
 采集入口，不做放大，因此 BEFORE、VLM 视频、NOW 和实时预览不会出现范围不一致。
 修改 ROI 后必须重新运行 probe；ROI 必须位于原图内，宽高必须为偶数。VLM 视频
 降采样为6 FPS、H.264 CRF 28，默认名义窗口和新覆盖周期均为7秒。独立线程每1秒领取一次当前 assignment，编码和上传也在线程中进行，
-因此ROS回调不会等待网络。每次切换步骤都会生成新的generation、清空旧帧、重拍
-CHAIN_BEFORE并重新积累首个7秒窗口；旧generation的上传结果会被忽略。客户端只允许一个上传/推理请求占用当前 assignment。已被服务端接受的窗口结束时间是连续覆盖游标；如果百炼耗时超过7秒，下一段从上一结束点前1秒开始，一直覆盖到最新帧。单段最长15秒，积压更长时拆成连续的15秒片段逐段追回，不会改成“只取最新7秒”而漏掉推理期间的动作。每次请求还上传上一窗口结尾的 PREV_NOW，帮助模型连接跨窗口状态。VLM返回
+因此ROS回调不会等待网络。assignment 身份切换时会生成新的generation、清空旧帧并重拍
+BEFORE；整链模式在步骤自动推进时保持同一个 assignment，继续使用整条链开始时的 CHAIN_BEFORE。旧generation的上传结果会被忽略。客户端只允许一个上传/推理请求占用当前 assignment。已被服务端接受的窗口结束时间是连续覆盖游标；如果百炼耗时超过7秒，下一段从上一结束点前1秒开始，一直覆盖到最新帧。单段最长15秒，积压更长时拆成连续的15秒片段逐段追回，不会改成“只取最新7秒”而漏掉推理期间的动作。VLM返回
 `succeeded`时后端自动推进；返回`failed`时暂停等待人工确认。
 
-整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端已确认步骤、当前及后续未完成步骤。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。第一个窗口没有完成的动作可以在后续窗口继续判断，已确认成功的步骤进入跨窗口账本且不会回退。Prompt 不再回灌上一轮 `in_progress` 的自由文本描述，跨窗口只依赖步骤账本、PREV_NOW、1秒重叠视频和当前窗口证据。Pick 使用 transition_or_state、Carry 使用 transition_event、Place 使用 persistent_state 的动作时间语义；最后步骤仍必须在 CURRENT_NOW 中成立。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
+整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端权威步骤状态、明确的当前 Step 和后续未完成步骤。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。每个已确认成功的 Step 只冻结一张由 `completion_evidence_timestamp_s` 提取的关键帧，并保存与该时间点最匹配的一条可见证据文字；后续请求会把这些图片作为不可推翻的历史事实。Prompt 不回灌上一轮 `in_progress` 的自由文本，也不上传任何历史视频。每次请求仅包含一段 CURRENT_WINDOW 视频，跨窗口还依赖步骤账本、已成功步骤关键帧、CHAIN_BEFORE、1秒视频重叠和 CURRENT_NOW。Pick 使用 transition_or_state、Carry 使用 transition_event、Place 使用 persistent_state 的动作时间语义；Place 的释放过程即使发生在上一窗口，只要 CURRENT_NOW 明确显示目标物稳定留在指定表面且手不再支撑，也可完成。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
 
 同一采集循环还会分出独立实时预览：目标上限为10 FPS、默认 `320×216` ROI、
 JPEG quality 65，通过二进制WebSocket上传，不使用Base64；实际FPS不会超过ROS2
@@ -260,7 +260,7 @@ JPEG quality 65，通过二进制WebSocket上传，不使用Base64；实际FPS�
 不会阻塞相机或VLM。网页显示最近2秒实际收到的预览FPS和采集到展示的延迟。
 VLM进入等待人工确认后，动态窗口和百炼请求暂停，但实时预览继续。网页会显示本轮实际窗口长度和模型相对实时画面的落后时间。
 
-每个 VLM 检查点上传 `CHAIN_BEFORE`、`PREV_NOW`、7～15 秒动态 H.264 视频和独立 `CURRENT_NOW` 结尾帧。实际 `window_duration_s` 同步驱动 Prompt、严格 JSON Schema、时间戳校验和完成证据提取，不再写死6秒。最终状态以 CURRENT_NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后1秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
+每个 VLM 检查点上传 `CHAIN_BEFORE`、每个已成功 Step 的一张冻结 JPEG、唯一一段 7～15 秒动态 H.264 `CURRENT_WINDOW` 和独立 `CURRENT_NOW` 结尾帧。不会上传上一窗口或前置 Step 的视频。实际 `window_duration_s` 同步驱动 Prompt、严格 JSON Schema、时间戳校验和完成证据提取，不再写死6秒。最终状态以 CURRENT_NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后1秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
 
 公网部署需要为 `/api/visual-monitor/live/` 转发 WebSocket Upgrade；当前服务器配置模板见 `deploy/nginx-instruction-breakdown.conf`。观看端使用 `OPERATOR_TOKEN`、采集端使用 `VISUAL_MONITOR_TOKEN`，认证消息在 WebSocket 建立后通过 TLS 发送，不放入 URL。
 
@@ -284,7 +284,7 @@ HTTP API(供其他程序调用):
 - `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
 - `POST /api/visual-monitor/claim` — ROS2相机客户端领取当前视觉Monitor任务
 - `POST /api/visual-monitor/baseline` — 上传操作开始前的 JPEG
-- `POST /api/visual-monitor/checkpoints` — 上传动态 H.264 窗口、PREV_NOW/CURRENT_NOW 和实际时长并异步触发百炼
+- `POST /api/visual-monitor/checkpoints` — 上传唯一的动态 H.264 CURRENT_WINDOW、CURRENT_NOW 和实际时长并异步触发百炼；历史成功关键帧由服务端附加
 - `POST /api/visual-monitor/upload-probe` — 只测采集/编码/上传，不请求模型
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:

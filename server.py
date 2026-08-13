@@ -570,7 +570,6 @@ async def upload_visual_checkpoint(
     encode_ms: float = Form(..., ge=0),
     upload_started_at: str | None = Form(default=None),
     video: UploadFile = File(...),
-    prev_now_image: UploadFile = File(...),
     now_image: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ) -> dict:
@@ -592,9 +591,8 @@ async def upload_visual_checkpoint(
         raise HTTPException(status_code=409, detail="请先上传 BEFORE baseline")
     try:
         path, size, video_write_ms = await visual_monitor.save_upload(video, ".mp4")
-        prev_now_path, prev_now_size, prev_now_write_ms = await visual_monitor.save_upload(prev_now_image, ".jpg")
         now_path, now_size, now_write_ms = await visual_monitor.save_upload(now_image, ".jpg")
-        write_ms = video_write_ms + prev_now_write_ms + now_write_ms
+        write_ms = video_write_ms + now_write_ms
         visual_monitor.cleanup_expired()
         await execution_manager.begin_visual_checkpoint(
             execution_id,
@@ -627,7 +625,6 @@ async def upload_visual_checkpoint(
                 sequence=sequence,
                 baseline_path=baseline,
                 video_path=path,
-                prev_now_path=prev_now_path,
                 now_path=now_path,
                 window_duration_s=window_duration_s,
                 window_started_at=window_started_at,
@@ -654,7 +651,6 @@ async def upload_visual_checkpoint(
             "accepted": True,
             "sequence": sequence,
             "bytes": size,
-            "prev_now_bytes": prev_now_size,
             "now_bytes": now_size,
             "window_duration_s": window_duration_s,
             "server_write_ms": round(write_ms, 1),

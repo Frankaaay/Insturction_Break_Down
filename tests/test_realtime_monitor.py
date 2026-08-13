@@ -42,8 +42,10 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("自行重新拆解", prompt)
         self.assertIn("原始指令：拿起水壶并放到桌子上", prompt)
         self.assertNotIn("手正在靠近水壶", prompt)
-        self.assertIn("不提供上一窗口自由文本观察", prompt)
-        self.assertIn("PREV_NOW", prompt)
+        self.assertIn("唯一的 CURRENT_WINDOW 视频", prompt)
+        self.assertIn("不存在任何历史视频", prompt)
+        self.assertIn("一张 HISTORY_STEP_KEYFRAME", prompt)
+        self.assertNotIn("PREV_NOW", prompt)
         result = {
             "status": "succeeded", "description_zh": "三步均已完成",
             "task_completion_evidence_timestamp_s": 6.4,
@@ -54,6 +56,76 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         self.assertEqual(validate_chain_result(result, assignment)["status"], "succeeded")
+
+    def test_chain_place_prompt_uses_authoritative_history_and_persistent_now(self):
+        assignment = {
+            "instruction": "拿起水壶并放到桌子上",
+            "current_step_index": 2,
+            "current_step_id": "place",
+            "confirmed_steps": [
+                {"step_id": "pick", "status": "succeeded"},
+                {"step_id": "carry", "status": "succeeded"},
+            ],
+            "steps": [
+                {"step_id": "pick", "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}, "zh": "拿起水壶"},
+                {"step_id": "carry", "action_id": "A_003", "logic": 0, "slots": {"obj_a": "水壶"}, "zh": "搬运水壶"},
+                {"step_id": "place", "action_id": "A_002", "logic": 1, "slots": {"obj_a": "水壶", "sur_a": "桌子"}, "zh": "放到桌子上"},
+            ],
+        }
+        prompt = build_chain_monitor_prompt(assignment, 3, 8.5)
+        self.assertIn("当前执行 Step：step_id=place，步骤序号=3", prompt)
+        self.assertIn("pick=succeeded（已附带唯一冻结成功关键帧）", prompt)
+        self.assertIn("carry=succeeded（已附带唯一冻结成功关键帧）", prompt)
+        self.assertIn("禁止回答“尚未拿起”“尚未搬运”", prompt)
+        self.assertIn("只要 CURRENT_NOW 能确认指定目标物稳定留在指定 sur_a", prompt)
+        self.assertIn("不得重新判断、否认或回退", prompt)
+
+    async def test_history_steps_contribute_one_frozen_image_each_and_no_video(self):
+        async def update(**kwargs):
+            return kwargs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pick.jpg").write_bytes(b"pick-image")
+            (root / "carry.jpg").write_bytes(b"carry-image")
+            service = VisualMonitorService(update, VisualMonitorConfig(root))
+            assignment = {
+                "monitor_scope": "chain",
+                "steps": [
+                    {"step_id": "pick", "zh": "拿起水壶"},
+                    {"step_id": "carry", "zh": "搬运水壶"},
+                ],
+                "confirmed_steps": [
+                    {
+                        "step_id": "pick", "status": "succeeded",
+                        "success_keyframe_url": "/api/visual-monitor/media/pick.jpg",
+                        "success_evidence_observation": "水壶离开原支撑面",
+                    },
+                    {
+                        "step_id": "carry", "status": "succeeded",
+                        "success_keyframe_url": "/api/visual-monitor/media/carry.jpg",
+                        "success_evidence_observation": "水壶相对拿起位置发生位移",
+                    },
+                ],
+            }
+            try:
+                content, count = service._history_keyframe_content(assignment)
+                self.assertEqual(count, 2)
+                self.assertEqual(
+                    [item["type"] for item in content],
+                    ["text", "image_url", "text", "image_url"],
+                )
+                self.assertFalse(any(item["type"] == "video_url" for item in content))
+                self.assertIn("冻结证据说明=水壶离开原支撑面", content[0]["text"])
+                self.assertIn("冻结证据说明=水壶相对拿起位置发生位移", content[2]["text"])
+                broken = {**assignment, "confirmed_steps": [{
+                    "step_id": "pick", "status": "succeeded",
+                    "success_keyframe_url": None,
+                }]}
+                with self.assertRaisesRegex(RuntimeError, "缺少成功关键帧"):
+                    service._history_keyframe_content(broken)
+            finally:
+                await service.close()
 
     def test_chain_result_only_accepts_unconfirmed_suffix(self):
         assignment = {

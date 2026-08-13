@@ -409,7 +409,7 @@ class MonitorClient:
 
     def upload_checkpoint(
         self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
-        frames: list[Any], previous_now_frame: Any, now_frame: Any,
+        frames: list[Any], now_frame: Any,
         window_start: float, window_end: float, latest_camera_at: float,
     ) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -428,10 +428,6 @@ class MonitorClient:
             now_payload = io.BytesIO()
             self.Image.fromarray(now_frame).save(
                 now_payload, format="JPEG", quality=82, optimize=True,
-            )
-            previous_now_payload = io.BytesIO()
-            self.Image.fromarray(previous_now_frame).save(
-                previous_now_payload, format="JPEG", quality=82, optimize=True,
             )
             encode_ms = (time.perf_counter() - encode_started) * 1000
             upload_started_wall = time.time()
@@ -454,7 +450,6 @@ class MonitorClient:
                     },
                     files={
                         "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
-                        "prev_now_image": (f"prev-now-{sequence:04d}.jpg", previous_now_payload.getvalue(), "image/jpeg"),
                         "now_image": (f"now-{sequence:04d}.jpg", now_payload.getvalue(), "image/jpeg"),
                     },
                 )
@@ -484,7 +479,6 @@ class MonitorClient:
         baseline_sent = False
         baseline_at = None
         covered_until = None
-        previous_now_frame = None
         next_checkpoint = None
         sequence = 0
         pause_announced = False
@@ -514,7 +508,6 @@ class MonitorClient:
                     baseline_sent = False
                     baseline_at = None
                     covered_until = None
-                    previous_now_frame = None
                     next_checkpoint = None
                     sequence = 0
                     pause_announced = False
@@ -552,7 +545,6 @@ class MonitorClient:
                                 print(json.dumps({"event": "checkpoint.uploaded", **result}, ensure_ascii=False))
                                 if result.get("accepted"):
                                     covered_until = metadata["window_end"]
-                                    previous_now_frame = metadata["now_frame"]
                                     next_checkpoint = covered_until + self.args.cycle_seconds
                         except Exception as exc:
                             print(json.dumps({"event": "checkpoint.error", "error": str(exc)}, ensure_ascii=False))
@@ -565,7 +557,6 @@ class MonitorClient:
                     baseline_sent = True
                     baseline_at = now
                     covered_until = now
-                    previous_now_frame = frame.copy()
                     next_checkpoint = now + self.args.window_seconds
                     self.report_phase(
                         assignment, camera_id, 1, "capturing", now,
@@ -584,7 +575,6 @@ class MonitorClient:
                         next_checkpoint = now + 0.5
                         continue
                     assert baseline_at is not None and covered_until is not None
-                    assert previous_now_frame is not None
                     window_start, window_end = continuous_window_bounds(
                         baseline_at, covered_until, now,
                         overlap_seconds=self.args.overlap_seconds,
@@ -597,13 +587,12 @@ class MonitorClient:
                         future = workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,
-                            selected, previous_now_frame.copy(), now_for_window.copy(),
+                            selected, now_for_window.copy(),
                             window_start, window_end, now,
                         )
                         pending[future] = {
                             "window_start": window_start,
                             "window_end": window_end,
-                            "now_frame": now_for_window.copy(),
                         }
                         next_checkpoint = now + 0.5
                     else:

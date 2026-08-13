@@ -234,12 +234,10 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "capture_ms": "6000", "encode_ms": "80",
             }, files={
                 "video": ("window.mp4", b"mp4", "video/mp4"),
-                "prev_now_image": ("prev-now.jpg", b"jpeg-prev", "image/jpeg"),
                 "now_image": ("now.jpg", b"jpeg-now", "image/jpeg"),
             })
             self.assertEqual(checkpoint.status_code, 202)
             self.assertEqual(checkpoint.json()["window_duration_s"], 6.0)
-            self.assertEqual(checkpoint.json()["prev_now_bytes"], len(b"jpeg-prev"))
             for _ in range(20):
                 if not service.in_flight:
                     break
@@ -342,7 +340,6 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "1"},
                 files={
                     "video": ("one.mp4", b"mp4", "video/mp4"),
-                    "prev_now_image": ("prev-one.jpg", b"jpeg-prev", "image/jpeg"),
                     "now_image": ("now-one.jpg", b"jpeg-now", "image/jpeg"),
                 },
             )
@@ -350,7 +347,6 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "2"},
                 files={
                     "video": ("two.mp4", b"mp4", "video/mp4"),
-                    "prev_now_image": ("prev-two.jpg", b"jpeg-prev", "image/jpeg"),
                     "now_image": ("now-two.jpg", b"jpeg-now", "image/jpeg"),
                 },
             )

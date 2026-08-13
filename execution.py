@@ -122,6 +122,31 @@ def _iso(value: datetime | None = None) -> str:
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _success_evidence_observation(observation: dict[str, Any] | None) -> str | None:
+    """Return the visible evidence text that best matches the frozen keyframe."""
+    if not observation:
+        return None
+    evidence = [
+        item for item in observation.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("observation"), str)
+    ]
+    if not evidence:
+        return None
+    completion = observation.get("completion_evidence_timestamp_s")
+    if isinstance(completion, (int, float)) and not isinstance(completion, bool):
+        timestamped = [
+            item for item in evidence
+            if isinstance(item.get("timestamp_s"), (int, float))
+            and not isinstance(item.get("timestamp_s"), bool)
+        ]
+        if timestamped:
+            evidence = [min(
+                timestamped,
+                key=lambda item: abs(float(item["timestamp_s"]) - float(completion)),
+            )]
+    return evidence[0]["observation"].strip() or None
+
+
 def timeout_from_env() -> float:
     """读取 monitor 超时；非法配置在启动时直接报错。"""
     raw = os.getenv("MONITOR_TIMEOUT_SECONDS", "20")
@@ -271,15 +296,41 @@ class ExecutionManager:
                         })
                     elif model_requested and not monitor.get("model_requested"):
                         monitor["model_requested"] = model_requested
-                    public_steps = [{
-                        key: copy.deepcopy(step.get(key))
-                        for key in ("step_id", "index", "action_id", "action", "logic", "slots", "zh", "en")
-                    } for step in execution["steps"]]
+                    current_index = execution["current_step_index"]
+                    public_steps = []
+                    confirmed_steps = []
+                    for index, step in enumerate(execution["steps"]):
+                        public_step = {
+                            key: copy.deepcopy(step.get(key))
+                            for key in ("step_id", "index", "action_id", "action", "logic", "slots", "zh", "en")
+                        }
+                        public_step["monitor_status"] = (
+                            "succeeded" if step["status"] == "succeeded"
+                            else "current" if index == current_index
+                            else "pending"
+                        )
+                        public_steps.append(public_step)
+                        if step["status"] == "succeeded":
+                            observation = None
+                            for historical_attempt in reversed(step.get("attempts", [])):
+                                if historical_attempt.get("chain_visual_observation"):
+                                    observation = historical_attempt["chain_visual_observation"]
+                                    break
+                            keyframe_url = (observation or {}).get("completion_evidence_url")
+                            confirmed_steps.append({
+                                "step_id": step["step_id"],
+                                "status": "succeeded",
+                                "description_zh": (observation or {}).get("description_zh"),
+                                "success_keyframe_url": keyframe_url,
+                                "success_evidence_observation": _success_evidence_observation(observation),
+                                "completion_evidence_timestamp_s": (
+                                    (observation or {}).get("completion_evidence_timestamp_s")
+                                ),
+                            })
                     previous_by_step = {
                         item.get("step_id"): item
                         for item in (monitor.get("latest") or {}).get("step_updates", [])
                     }
-                    current_index = execution["current_step_index"]
                     previous_status = (monitor.get("latest") or {}).get("status")
                     if previous_status not in {None, "succeeded", "in_progress", "failed"}:
                         previous_status = "in_progress"
@@ -289,11 +340,9 @@ class ExecutionManager:
                         "monitor_scope": "chain",
                         "instruction": execution["instruction"],
                         "steps": public_steps,
-                        "confirmed_steps": [
-                            {"step_id": step["step_id"], "status": "succeeded"}
-                            for step in execution["steps"] if step["status"] == "succeeded"
-                        ],
+                        "confirmed_steps": confirmed_steps,
                         "current_step_index": current_index,
+                        "current_step_id": execution["steps"][current_index]["step_id"],
                         "unfinished_steps": [{
                             "step_id": step["step_id"],
                             "status": (

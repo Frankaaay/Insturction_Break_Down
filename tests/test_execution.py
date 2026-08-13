@@ -108,8 +108,20 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
             execution["execution_id"], attempt_id=session_id, camera_id="camera-1", sequence=1,
         )
         updates = [
-            {"step_id": started["steps"][0]["step_id"], "status": "succeeded", "description_zh": "已拿起"},
-            {"step_id": started["steps"][1]["step_id"], "status": "succeeded", "description_zh": "已搬运"},
+            {
+                "step_id": started["steps"][0]["step_id"], "status": "succeeded",
+                "description_zh": "已拿起",
+                "evidence": [{"timestamp_s": 1.1, "observation": "手接近水壶"}, {"timestamp_s": 2.0, "observation": "水壶离开支撑面"}],
+                "completion_evidence_timestamp_s": 2.0,
+                "completion_evidence_url": "/api/visual-monitor/media/pick.jpg",
+            },
+            {
+                "step_id": started["steps"][1]["step_id"], "status": "succeeded",
+                "description_zh": "已搬运",
+                "evidence": [{"timestamp_s": 3.0, "observation": "水壶相对拿起位置发生位移"}],
+                "completion_evidence_timestamp_s": 3.0,
+                "completion_evidence_url": "/api/visual-monitor/media/carry.jpg",
+            },
             {"step_id": started["steps"][2]["step_id"], "status": "in_progress", "description_zh": "尚未放稳"},
         ]
         snapshot = await self.manager.apply_chain_visual_result(
@@ -128,9 +140,26 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reclaimed["attempt_id"], session_id)
         self.assertEqual(reclaimed["monitor_state"], "observing")
         self.assertEqual(reclaimed["current_step_index"], 2)
+        self.assertEqual(reclaimed["current_step_id"], started["steps"][2]["step_id"])
+        self.assertEqual(
+            [step["monitor_status"] for step in reclaimed["steps"]],
+            ["succeeded", "succeeded", "current"],
+        )
         self.assertEqual(reclaimed["confirmed_steps"], [
-            {"step_id": started["steps"][0]["step_id"], "status": "succeeded"},
-            {"step_id": started["steps"][1]["step_id"], "status": "succeeded"},
+            {
+                "step_id": started["steps"][0]["step_id"], "status": "succeeded",
+                "description_zh": "已拿起",
+                "success_keyframe_url": "/api/visual-monitor/media/pick.jpg",
+                "success_evidence_observation": "水壶离开支撑面",
+                "completion_evidence_timestamp_s": 2.0,
+            },
+            {
+                "step_id": started["steps"][1]["step_id"], "status": "succeeded",
+                "description_zh": "已搬运",
+                "success_keyframe_url": "/api/visual-monitor/media/carry.jpg",
+                "success_evidence_observation": "水壶相对拿起位置发生位移",
+                "completion_evidence_timestamp_s": 3.0,
+            },
         ])
         self.assertEqual(reclaimed["unfinished_steps"], [{
             "step_id": started["steps"][2]["step_id"],
