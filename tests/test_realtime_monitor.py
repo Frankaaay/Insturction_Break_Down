@@ -255,6 +255,9 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("移动慢、暂时停止", carry)
         self.assertIn("不要求判断最终目标位置", carry)
         self.assertIn("仅在明确搬运了错误物体", carry)
+        self.assertIn("当前阶段由人类用手执行操作", carry)
+        self.assertIn("不得因为机械臂静止", carry)
+        self.assertIn("由人手操作所以失败", carry)
 
         place = build_monitor_prompt({
             "action_id": "A_002", "logic": 1,
@@ -269,6 +272,20 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 "action_id": "A_002", "logic": 0,
                 "slots": {"obj_a": "水壶", "obj_b": "杯子"},
             }, 1)
+
+    def test_chain_prompt_treats_human_hand_as_valid_operator(self):
+        prompt = build_chain_monitor_prompt({
+            "instruction": "拿起水壶并放到桌子上",
+            "current_step_index": 0,
+            "confirmed_steps": [],
+            "steps": [{
+                "step_id": "pick", "action_id": "A_001", "logic": 0,
+                "slots": {"obj_a": "水壶"}, "zh": "拿起水壶",
+            }],
+        }, 1)
+        self.assertIn("人手是合法且唯一需要评估的执行者", prompt)
+        self.assertIn("机械臂、夹爪暂时视为无关背景", prompt)
+        self.assertIn("人手使指定目标物满足动作成功后置条件", prompt)
 
     async def test_concurrency_limit_rejects_third_job(self):
         updates = []

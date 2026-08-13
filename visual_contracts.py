@@ -108,6 +108,14 @@ ACTION_CONTRACTS = {
 }
 
 
+HUMAN_OPERATOR_CONTEXT = """当前测试执行者限定：
+- 当前阶段由人类用手执行操作；人手是合法且唯一需要评估的执行者。
+- 画面中的机械臂、夹爪暂时视为无关背景，不要求机械臂参与动作，也不判断机械臂是否执行。
+- 不得因为机械臂静止、未接近目标物、未抓握目标物或未参与动作而返回 failed。
+- 人手使指定目标物满足动作成功后置条件时，应按 succeeded 判定，不能写成“由人手操作所以失败”。
+- 状态只依据指定目标物、人的手、支撑面或目标位置之间直接可见的关系变化判断。"""
+
+
 def get_visual_contract(action_id: str, logic: int) -> ActionVisualContract | None:
     return ACTION_CONTRACTS.get((action_id, logic))
 
@@ -149,6 +157,8 @@ def build_monitor_prompt(assignment: dict[str, Any], sequence: int) -> str:
 动作参数：{slot_text}
 检查点序号：{sequence}
 上一次状态：{assignment.get('previous_status') or '无'}（只作为时序参考，本次仍以直接可见证据为准）
+
+{HUMAN_OPERATOR_CONTEXT}
 
 公共状态规则：
 - in_progress：操作尚未完成，或者因遮挡、画质、物体身份等原因暂时无法确认；description_zh 必须写明具体原因。可恢复的抓空、滑脱或掉落后继续尝试也属于 in_progress。
@@ -229,6 +239,8 @@ failed 边界：
 
 当前及后续未完成步骤（上一窗口摘要只作为时序参考）：
 {unfinished_text}
+
+{HUMAN_OPERATOR_CONTEXT}
 
 {chr(10).join(rendered_steps)}
 
