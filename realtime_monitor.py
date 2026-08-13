@@ -24,7 +24,8 @@ from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
 
 BAILIAN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024
-MONITOR_WINDOW_SECONDS = 6.0
+MONITOR_WINDOW_SECONDS = 7.0
+MAX_MONITOR_WINDOW_SECONDS = 15.0
 MONITOR_TIMESTAMP_MAX = MONITOR_WINDOW_SECONDS + 0.2
 MONITOR_SUCCESS_EVIDENCE_MIN = MONITOR_WINDOW_SECONDS - 1.0
 MONITOR_NOW_EVIDENCE_THRESHOLD = MONITOR_WINDOW_SECONDS - 0.05
@@ -90,6 +91,35 @@ CHAIN_OUTPUT_SCHEMA = {
 }
 
 
+def _window_limits(window_duration_s: float) -> tuple[float, float, float]:
+    if not 0 < window_duration_s <= MAX_MONITOR_WINDOW_SECONDS:
+        raise ValueError("window_duration_s 必须在 0 到 15 秒之间")
+    return (
+        window_duration_s + 0.2,
+        max(0.0, window_duration_s - 1.0),
+        max(0.0, window_duration_s - 0.05),
+    )
+
+
+def output_schema_for_window(window_duration_s: float, *, chain_mode: bool) -> dict[str, Any]:
+    """Create a strict schema whose timestamp ceiling matches this video."""
+    timestamp_max, _, _ = _window_limits(window_duration_s)
+    schema = copy.deepcopy(CHAIN_OUTPUT_SCHEMA if chain_mode else OUTPUT_SCHEMA)
+
+    def replace_timestamp_maximum(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "number" or value.get("type") == ["number", "null"]:
+                value["maximum"] = timestamp_max
+            for nested in value.values():
+                replace_timestamp_maximum(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                replace_timestamp_maximum(nested)
+
+    replace_timestamp_maximum(schema)
+    return schema
+
+
 class ModelResponseValidationError(ValueError):
     def __init__(
         self, message: str, *, raw_body: str, actual_model: str,
@@ -152,7 +182,10 @@ def normalize_model_json(value: Any) -> tuple[dict[str, Any], list[str]]:
     return normalized, applied
 
 
-def validate_result(value: dict[str, Any]) -> dict[str, Any]:
+def validate_result(
+    value: dict[str, Any], window_duration_s: float = MONITOR_WINDOW_SECONDS,
+) -> dict[str, Any]:
+    timestamp_max, success_evidence_min, _ = _window_limits(window_duration_s)
     required = {
         "status", "description_zh", "failure_reason", "evidence",
         "completion_evidence_timestamp_s",
@@ -170,9 +203,9 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("非 failed 状态的 failure_reason 必须为 null")
     completion = value.get("completion_evidence_timestamp_s")
     if status == "succeeded":
-        if not isinstance(completion, (int, float)) or not 0 <= completion <= MONITOR_TIMESTAMP_MAX:
+        if not isinstance(completion, (int, float)) or not 0 <= completion <= timestamp_max:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
-        if completion < MONITOR_SUCCESS_EVIDENCE_MIN:
+        if completion < success_evidence_min:
             raise ValueError("succeeded 的完成证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
@@ -188,7 +221,7 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
             not isinstance(item, dict)
             or set(item) != {"timestamp_s", "observation"}
             or not isinstance(item.get("timestamp_s"), (int, float))
-            or not 0 <= item["timestamp_s"] <= MONITOR_TIMESTAMP_MAX
+            or not 0 <= item["timestamp_s"] <= timestamp_max
             or not isinstance(item.get("observation"), str)
             or not item["observation"].strip()
         ):
@@ -196,7 +229,11 @@ def validate_result(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _validate_observation_fields(value: dict[str, Any], *, final_step: bool = False) -> None:
+def _validate_observation_fields(
+    value: dict[str, Any], *, final_step: bool = False,
+    window_duration_s: float = MONITOR_WINDOW_SECONDS,
+) -> None:
+    timestamp_max, success_evidence_min, _ = _window_limits(window_duration_s)
     status = value.get("status")
     if status not in {"in_progress", "succeeded", "failed"}:
         raise ValueError("模型 status 非法")
@@ -208,9 +245,9 @@ def _validate_observation_fields(value: dict[str, Any], *, final_step: bool = Fa
         raise ValueError("非 failed 状态的 failure_reason 必须为 null")
     completion = value.get("completion_evidence_timestamp_s")
     if status == "succeeded":
-        if not isinstance(completion, (int, float)) or not 0 <= completion <= MONITOR_TIMESTAMP_MAX:
+        if not isinstance(completion, (int, float)) or not 0 <= completion <= timestamp_max:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
-        if final_step and completion < MONITOR_SUCCESS_EVIDENCE_MIN:
+        if final_step and completion < success_evidence_min:
             raise ValueError("最终步骤成功证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
@@ -224,14 +261,18 @@ def _validate_observation_fields(value: dict[str, Any], *, final_step: bool = Fa
             not isinstance(item, dict)
             or set(item) != {"timestamp_s", "observation"}
             or not isinstance(item.get("timestamp_s"), (int, float))
-            or not 0 <= item["timestamp_s"] <= MONITOR_TIMESTAMP_MAX
+            or not 0 <= item["timestamp_s"] <= timestamp_max
             or not isinstance(item.get("observation"), str)
             or not item["observation"].strip()
         ):
             raise ValueError("模型 evidence 条目非法")
 
 
-def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> dict[str, Any]:
+def validate_chain_result(
+    value: dict[str, Any], assignment: dict[str, Any],
+    window_duration_s: float = MONITOR_WINDOW_SECONDS,
+) -> dict[str, Any]:
+    timestamp_max, success_evidence_min, _ = _window_limits(window_duration_s)
     required = {"status", "description_zh", "step_updates", "task_completion_evidence_timestamp_s"}
     if not isinstance(value, dict) or set(value) != required:
         raise ValueError("整链模型 JSON 字段与契约不一致")
@@ -252,7 +293,11 @@ def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> 
     for index, item in enumerate(updates):
         if not isinstance(item, dict) or set(item) != step_required:
             raise ValueError("step_update 字段与契约不一致")
-        _validate_observation_fields(item, final_step=current_index + index == len(all_steps) - 1)
+        _validate_observation_fields(
+            item,
+            final_step=current_index + index == len(all_steps) - 1,
+            window_duration_s=window_duration_s,
+        )
     if any(item["status"] != "succeeded" for item in updates[:-1]):
         raise ValueError("第一个未成功步骤之后不得继续输出 step_updates")
     last_status = updates[-1]["status"]
@@ -264,7 +309,7 @@ def validate_chain_result(value: dict[str, Any], assignment: dict[str, Any]) -> 
         raise ValueError("顶层 status 与逐步状态不一致")
     task_completion = value.get("task_completion_evidence_timestamp_s")
     if derived == "succeeded":
-        if not isinstance(task_completion, (int, float)) or not MONITOR_SUCCESS_EVIDENCE_MIN <= task_completion <= MONITOR_TIMESTAMP_MAX:
+        if not isinstance(task_completion, (int, float)) or not success_evidence_min <= task_completion <= timestamp_max:
             raise ValueError("整链成功证据必须位于窗口最后 1 秒")
     elif task_completion is not None:
         raise ValueError("非整链成功不得填写任务完成证据时间")
@@ -318,7 +363,12 @@ class VisualMonitorService:
         video_path: Path,
         now_path: Path,
         client_timings: dict[str, float],
+        prev_now_path: Path | None = None,
+        window_duration_s: float = MONITOR_WINDOW_SECONDS,
+        window_started_at: str | None = None,
+        window_ended_at: str | None = None,
     ) -> None:
+        _window_limits(window_duration_s)
         if len(self._tasks) >= self.config.max_concurrency:
             raise RuntimeError("Visual Monitor 推理并发已满，请等待下一个检查点")
         task = asyncio.create_task(
@@ -328,7 +378,11 @@ class VisualMonitorService:
                 sequence=sequence,
                 baseline_path=baseline_path,
                 video_path=video_path,
+                prev_now_path=prev_now_path or baseline_path,
                 now_path=now_path,
+                window_duration_s=window_duration_s,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
                 client_timings=client_timings,
             ),
             name=f"visual-monitor:{assignment['execution_id']}:{sequence}",
@@ -346,7 +400,8 @@ class VisualMonitorService:
         }
         try:
             call_result = await self._call_bailian(
-                assignment, job["sequence"], job["baseline_path"], job["video_path"], job["now_path"]
+                assignment, job["sequence"], job["baseline_path"], job["prev_now_path"],
+                job["video_path"], job["now_path"], job["window_duration_s"],
             )
             if len(call_result) == 4:
                 result, timings, actual_model, raw = call_result
@@ -361,12 +416,14 @@ class VisualMonitorService:
                     if completion is not None:
                         item["completion_evidence_url"] = await self._completion_evidence_url(
                             job["video_path"], job["now_path"], float(completion),
+                            job["window_duration_s"],
                         )
             else:
                 completion = result.get("completion_evidence_timestamp_s")
                 if completion is not None:
                     evidence_url = await self._completion_evidence_url(
                         job["video_path"], job["now_path"], float(completion),
+                        job["window_duration_s"],
                     )
             latest = {
                 **result,
@@ -375,6 +432,9 @@ class VisualMonitorService:
                 "model_actual": actual_model,
                 "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
                 "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
+                "window_duration_s": job["window_duration_s"],
+                "window_started_at": job["window_started_at"],
+                "window_ended_at": job["window_ended_at"],
                 "completion_evidence_url": evidence_url,
                 "timings_ms": {
                     **job["client_timings"],
@@ -407,6 +467,9 @@ class VisualMonitorService:
                             "pipeline": {
                                 "phase": "completed", "sequence": job["sequence"],
                                 "phase_started_at": latest["observed_at"],
+                                "window_started_at": job["window_started_at"],
+                                "window_ended_at": job["window_ended_at"],
+                                "window_duration_s": job["window_duration_s"],
                                 "timings_ms": latest["timings_ms"],
                             },
                         },
@@ -429,6 +492,9 @@ class VisualMonitorService:
                 "model_actual": getattr(exc, "actual_model", None),
                 "video_url": f"/api/visual-monitor/media/{job['video_path'].name}",
                 "now_url": f"/api/visual-monitor/media/{job['now_path'].name}",
+                "window_duration_s": job["window_duration_s"],
+                "window_started_at": job["window_started_at"],
+                "window_ended_at": job["window_ended_at"],
                 "timings_ms": {
                     **job["client_timings"],
                     **error_timings,
@@ -456,6 +522,9 @@ class VisualMonitorService:
                         "pipeline": {
                             "phase": "error", "sequence": job["sequence"],
                             "phase_started_at": error_latest["observed_at"],
+                            "window_started_at": job["window_started_at"],
+                            "window_ended_at": job["window_ended_at"],
+                            "window_duration_s": job["window_duration_s"],
                             "error": str(exc),
                             "timings_ms": error_latest["timings_ms"],
                         },
@@ -468,32 +537,39 @@ class VisualMonitorService:
 
     async def _call_bailian(
         self, assignment: dict[str, Any], sequence: int, baseline_path: Path,
-        video_path: Path, now_path: Path,
+        prev_now_path: Path, video_path: Path, now_path: Path,
+        window_duration_s: float,
     ) -> tuple[dict[str, Any], dict[str, float], str, str, dict[str, Any]]:
         key = os.getenv("DASHSCOPE_API_KEY", "")
         if not key:
             raise RuntimeError("服务器未配置 DASHSCOPE_API_KEY")
         prep_started = time.perf_counter()
         baseline_data = base64.b64encode(baseline_path.read_bytes()).decode("ascii")
+        prev_now_data = base64.b64encode(prev_now_path.read_bytes()).decode("ascii")
         video_data = base64.b64encode(video_path.read_bytes()).decode("ascii")
         now_data = base64.b64encode(now_path.read_bytes()).decode("ascii")
         prep_ms = (time.perf_counter() - prep_started) * 1000
         chain_mode = assignment.get("monitor_scope") == "chain"
-        output_schema = copy.deepcopy(CHAIN_OUTPUT_SCHEMA if chain_mode else OUTPUT_SCHEMA)
+        output_schema = output_schema_for_window(window_duration_s, chain_mode=chain_mode)
         if chain_mode:
             pending_count = len(assignment.get("steps", [])) - int(assignment.get("current_step_index", 0))
             output_schema["properties"]["step_updates"].update({
                 "minItems": 1,
                 "maxItems": pending_count,
             })
-        prompt = build_chain_monitor_prompt(assignment, sequence) if chain_mode else build_monitor_prompt(assignment, sequence)
+        prompt = (
+            build_chain_monitor_prompt(assignment, sequence, window_duration_s)
+            if chain_mode else build_monitor_prompt(assignment, sequence, window_duration_s)
+        )
         payload = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
                 {"type": "text", "text": "BEFORE：本次整条操作链开始前的初始画面。" if chain_mode else "BEFORE：本原子操作开始前的初始画面。"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{baseline_data}"}},
-                {"type": "text", "text": "WINDOW：从 BEFORE 之后到当前检查点的 6 秒视频。"},
+                {"type": "text", "text": "PREV_NOW：上一段已提交窗口的结尾画面；它与本段开头附近有重叠，用于连接跨窗口动作。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{prev_now_data}"}},
+                {"type": "text", "text": f"WINDOW：连续时间轴上的本段 {window_duration_s:.3f} 秒视频。"},
                 {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_data}"}},
                 {"type": "text", "text": "NOW：检查点结束时的当前画面；最终状态必须以此画面为准。"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{now_data}"}},
@@ -549,7 +625,10 @@ class VisualMonitorService:
             else:
                 raise ValueError("模型 message.content 必须是 JSON 文本、对象或数组")
             normalized, normalization_applied = normalize_model_json(parsed)
-            result = validate_chain_result(normalized, assignment) if chain_mode else validate_result(normalized)
+            result = (
+                validate_chain_result(normalized, assignment, window_duration_s)
+                if chain_mode else validate_result(normalized, window_duration_s)
+            )
         except (json.JSONDecodeError, TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
             raise ModelResponseValidationError(
                 str(exc), raw_body=raw_body, actual_model=actual_model, timings_ms=timings,
@@ -564,12 +643,12 @@ class VisualMonitorService:
 
     async def _completion_evidence_url(
         self, video_path: Path, now_path: Path, timestamp: float,
+        window_duration_s: float = MONITOR_WINDOW_SECONDS,
     ) -> str:
-        # A six-second CFR video containing 36 frames at 6 FPS has its final
-        # decodable frame near 5.833s. NOW is the authoritative end-of-window
-        # image, so an API timestamp at the 6.0s boundary should use it instead
-        # of creating a URL for an FFmpeg seek that produced no file.
-        if timestamp >= MONITOR_NOW_EVIDENCE_THRESHOLD:
+        # The final CFR video frame precedes the nominal end timestamp. NOW is
+        # authoritative for evidence reported at the dynamic window boundary.
+        _, _, now_evidence_threshold = _window_limits(window_duration_s)
+        if timestamp >= now_evidence_threshold:
             if not now_path.is_file() or now_path.stat().st_size == 0:
                 raise RuntimeError("NOW 完成证据图不存在或为空")
             return f"/api/visual-monitor/media/{now_path.name}"

@@ -121,7 +121,7 @@ def uploads_paused(assignment: dict[str, Any] | None) -> bool:
 def checkpoint_block_reason(assignment: dict[str, Any], pending_count: int) -> str | None:
     if assignment.get("monitor_state") == "inferencing":
         return "server inference still running"
-    if pending_count >= 2:
+    if pending_count >= 1:
         return "local upload slots busy"
     return None
 
@@ -303,7 +303,7 @@ class MonitorClient:
             self.source.stop()
             raise RuntimeError("ROS2 相机在等待首帧期间没有提供画面")
         # The first frame proves DDS discovery is complete but is intentionally
-        # excluded. The six-second probe window starts from the next frame.
+        # excluded. The configured probe window starts from the next frame.
         window_started_at = time.time()
         started = time.perf_counter()
         capture_finished = started
@@ -382,6 +382,8 @@ class MonitorClient:
         phase: str, phase_started_at: float, *,
         window_started_at: float | None = None,
         window_ended_at: float | None = None,
+        window_duration_s: float | None = None,
+        camera_lag_s: float | None = None,
     ) -> None:
         payload = {
             "execution_id": assignment["execution_id"],
@@ -392,6 +394,8 @@ class MonitorClient:
             "phase_started_at": utc_iso(phase_started_at),
             "window_started_at": utc_iso(window_started_at) if window_started_at is not None else None,
             "window_ended_at": utc_iso(window_ended_at) if window_ended_at is not None else None,
+            "window_duration_s": window_duration_s,
+            "camera_lag_s": camera_lag_s,
         }
         try:
             response = self.http.post("/api/visual-monitor/telemetry", json=payload)
@@ -405,15 +409,19 @@ class MonitorClient:
 
     def upload_checkpoint(
         self, assignment: dict[str, Any], camera_id: str, sequence: int, generation: int,
-        frames: list[Any], now_frame: Any, window_start: float, window_end: float,
+        frames: list[Any], previous_now_frame: Any, now_frame: Any,
+        window_start: float, window_end: float, latest_camera_at: float,
     ) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             video_path = Path(tmp.name)
         try:
+            window_duration_s = window_end - window_start
+            camera_lag_s = max(0.0, latest_camera_at - window_end)
             encode_started_wall = time.time()
             self.report_phase(
                 assignment, camera_id, sequence, "encoding", encode_started_wall,
                 window_started_at=window_start, window_ended_at=window_end,
+                window_duration_s=window_duration_s, camera_lag_s=camera_lag_s,
             )
             encode_started = time.perf_counter()
             encode_mp4(frames, video_path, self.args.video_fps, self.args.ffmpeg)
@@ -421,11 +429,16 @@ class MonitorClient:
             self.Image.fromarray(now_frame).save(
                 now_payload, format="JPEG", quality=82, optimize=True,
             )
+            previous_now_payload = io.BytesIO()
+            self.Image.fromarray(previous_now_frame).save(
+                previous_now_payload, format="JPEG", quality=82, optimize=True,
+            )
             encode_ms = (time.perf_counter() - encode_started) * 1000
             upload_started_wall = time.time()
             self.report_phase(
                 assignment, camera_id, sequence, "uploading", upload_started_wall,
                 window_started_at=window_start, window_ended_at=window_end,
+                window_duration_s=window_duration_s, camera_lag_s=camera_lag_s,
             )
             upload_started = time.perf_counter()
             with video_path.open("rb") as handle:
@@ -435,11 +448,13 @@ class MonitorClient:
                         "execution_id": assignment["execution_id"], "attempt_id": assignment["attempt_id"],
                         "camera_id": camera_id, "sequence": sequence,
                         "window_started_at": utc_iso(window_start), "window_ended_at": utc_iso(window_end),
+                        "window_duration_s": window_duration_s,
                         "capture_ms": (window_end - window_start) * 1000, "encode_ms": encode_ms,
                         "upload_started_at": utc_iso(upload_started_wall),
                     },
                     files={
                         "video": (f"window-{sequence:04d}.mp4", handle, "video/mp4"),
+                        "prev_now_image": (f"prev-now-{sequence:04d}.jpg", previous_now_payload.getvalue(), "image/jpeg"),
                         "now_image": (f"now-{sequence:04d}.jpg", now_payload.getvalue(), "image/jpeg"),
                     },
                 )
@@ -449,7 +464,14 @@ class MonitorClient:
             if response.status_code == 409:
                 return {"accepted": False, "stale": True, "generation": generation, "sequence": sequence, "reason": response.json().get("detail"), "upload_roundtrip_ms": round(upload_ms, 1)}
             response.raise_for_status()
-            return {**response.json(), "generation": generation, "upload_roundtrip_ms": round(upload_ms, 1), "encoded_bytes": video_path.stat().st_size, "frames": len(frames)}
+            return {
+                **response.json(), "generation": generation,
+                "upload_roundtrip_ms": round(upload_ms, 1),
+                "encoded_bytes": video_path.stat().st_size, "frames": len(frames),
+                "window_start_epoch": window_start, "window_end_epoch": window_end,
+                "window_duration_s": round(window_duration_s, 3),
+                "camera_lag_s": round(camera_lag_s, 3),
+            }
         finally:
             video_path.unlink(missing_ok=True)
 
@@ -460,16 +482,20 @@ class MonitorClient:
         assignment = None
         generation = 0
         baseline_sent = False
+        baseline_at = None
+        covered_until = None
+        previous_now_frame = None
         next_checkpoint = None
         sequence = 0
         pause_announced = False
-        workers = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        pending: set[concurrent.futures.Future] = set()
+        workers = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        pending: dict[concurrent.futures.Future, dict[str, Any]] = {}
         poller = AssignmentPoller(self.args, self.token, camera_id)
         poller.start()
         preview = LivePreviewSender(self.args, self.token, camera_id, self.Image)
         preview.start()
         next_preview = 0.0
+        next_buffer_frame = 0.0
         print(json.dumps({"event": "camera.ready", "camera_id": camera_id}, ensure_ascii=False))
         try:
             while True:
@@ -486,9 +512,13 @@ class MonitorClient:
                     generation = polled_generation
                     assignment = polled_assignment
                     baseline_sent = False
+                    baseline_at = None
+                    covered_until = None
+                    previous_now_frame = None
                     next_checkpoint = None
                     sequence = 0
                     pause_announced = False
+                    next_buffer_frame = 0.0
                     ring.clear()
                     if assignment:
                         print(json.dumps({"event": "assignment.claimed", "generation": generation, **assignment}, ensure_ascii=False))
@@ -508,30 +538,41 @@ class MonitorClient:
                         }, ensure_ascii=False))
                         pause_announced = True
                     continue
-                ring.append((now, frame))
-                while ring and ring[0][0] < now - self.args.window_seconds - 1:
-                    ring.popleft()
+                if assignment is not None and now >= next_buffer_frame:
+                    ring.append((now, frame))
+                    next_buffer_frame = now + 1.0 / self.args.video_fps
                 for future in list(pending):
                     if future.done():
-                        pending.remove(future)
+                        metadata = pending.pop(future)
                         try:
                             result = future.result()
                             if result.get("generation") != generation:
                                 print(json.dumps({"event": "checkpoint.stale_ignored", **result}, ensure_ascii=False))
                             else:
                                 print(json.dumps({"event": "checkpoint.uploaded", **result}, ensure_ascii=False))
+                                if result.get("accepted"):
+                                    covered_until = metadata["window_end"]
+                                    previous_now_frame = metadata["now_frame"]
+                                    next_checkpoint = covered_until + self.args.cycle_seconds
                         except Exception as exc:
                             print(json.dumps({"event": "checkpoint.error", "error": str(exc)}, ensure_ascii=False))
+                            next_checkpoint = now + 0.5
                 if assignment is None:
+                    ring.clear()
                     continue
                 if not baseline_sent:
                     self.upload_baseline(assignment, camera_id, frame, now)
                     baseline_sent = True
+                    baseline_at = now
+                    covered_until = now
+                    previous_now_frame = frame.copy()
                     next_checkpoint = now + self.args.window_seconds
                     self.report_phase(
                         assignment, camera_id, 1, "capturing", now,
                         window_started_at=now,
                         window_ended_at=next_checkpoint,
+                        window_duration_s=self.args.window_seconds,
+                        camera_lag_s=0.0,
                     )
                     print(json.dumps({"event": "baseline.uploaded", "captured_at": utc_iso(now)}, ensure_ascii=False))
                 if now >= next_checkpoint:
@@ -542,19 +583,38 @@ class MonitorClient:
                         # in-flight result/upload finishes; don't lose a full cycle.
                         next_checkpoint = now + 0.5
                         continue
-                    window_start = now - self.args.window_seconds
-                    selected = sample_window(ring, window_start, now, self.args.video_fps)
-                    if selected:
+                    assert baseline_at is not None and covered_until is not None
+                    assert previous_now_frame is not None
+                    window_start, window_end = continuous_window_bounds(
+                        baseline_at, covered_until, now,
+                        overlap_seconds=self.args.overlap_seconds,
+                        max_window_seconds=self.args.max_window_seconds,
+                    )
+                    selected = sample_window(ring, window_start, window_end, self.args.video_fps)
+                    now_for_window = frame_at_or_before(ring, window_end)
+                    if selected and now_for_window is not None:
                         sequence += 1
-                        pending.add(workers.submit(
+                        future = workers.submit(
                             self.upload_checkpoint, assignment, camera_id, sequence,
                             generation,
-                            selected, frame.copy(), window_start, now,
-                        ))
-                        next_checkpoint = now + self.args.cycle_seconds
+                            selected, previous_now_frame.copy(), now_for_window.copy(),
+                            window_start, window_end, now,
+                        )
+                        pending[future] = {
+                            "window_start": window_start,
+                            "window_end": window_end,
+                            "now_frame": now_for_window.copy(),
+                        }
+                        next_checkpoint = now + 0.5
                     else:
                         print(json.dumps({"event": "checkpoint.deferred", "sequence": sequence + 1, "reason": "window has no frames"}, ensure_ascii=False))
                         next_checkpoint = now + 0.5
+                if baseline_at is not None and covered_until is not None:
+                    retain_from = max(baseline_at, covered_until - self.args.overlap_seconds)
+                    if pending:
+                        retain_from = min(retain_from, *(item["window_start"] for item in pending.values()))
+                    while ring and ring[0][0] < retain_from:
+                        ring.popleft()
         except KeyboardInterrupt:
             print(json.dumps({"event": "client.stopped"}, ensure_ascii=False))
         finally:
@@ -570,8 +630,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("command", choices=["probe", "run"])
     result.add_argument("--server", default="http://127.0.0.1:8000")
     result.add_argument("--token")
-    result.add_argument("--window-seconds", type=float, default=6.0)
-    result.add_argument("--cycle-seconds", type=float, default=6.0)
+    result.add_argument("--window-seconds", type=float, default=7.0)
+    result.add_argument("--cycle-seconds", type=float, default=7.0)
+    result.add_argument("--overlap-seconds", type=float, default=1.0)
+    result.add_argument("--max-window-seconds", type=float, default=15.0)
     result.add_argument("--assignment-poll-seconds", type=float, default=1.0)
     result.add_argument("--video-fps", type=int, default=6)
     result.add_argument("--preview-fps", type=float, default=10.0)
@@ -583,6 +645,27 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--no-proxy", action="store_true", help="不读取 HTTP_PROXY/HTTPS_PROXY")
     result.add_argument("--insecure", action="store_true", help="仅用于自签名证书测试")
     return result
+
+
+def continuous_window_bounds(
+    baseline_at: float,
+    covered_until: float,
+    latest_at: float,
+    *,
+    overlap_seconds: float = 1.0,
+    max_window_seconds: float = 15.0,
+) -> tuple[float, float]:
+    """Return the next gap-free window without advancing the coverage cursor."""
+    if latest_at < covered_until:
+        raise ValueError("最新帧时间不能早于连续覆盖游标")
+    first_window = covered_until <= baseline_at
+    start = baseline_at if first_window else max(baseline_at, covered_until - overlap_seconds)
+    return start, min(latest_at, start + max_window_seconds)
+
+
+def frame_at_or_before(buffer: deque, timestamp: float) -> Any | None:
+    candidates = [frame for ts, frame in buffer if ts <= timestamp]
+    return candidates[-1] if candidates else None
 
 
 def sample_fixed_window(
@@ -599,12 +682,15 @@ def sample_fixed_window(
 def validate_args(args: argparse.Namespace) -> None:
     if (
         args.window_seconds <= 0 or args.cycle_seconds <= 0
+        or args.overlap_seconds < 0
+        or args.max_window_seconds < args.window_seconds
+        or args.overlap_seconds >= args.max_window_seconds
         or args.assignment_poll_seconds <= 0 or args.video_fps <= 0
         or not 0 < args.preview_fps <= 10
         or args.preview_width <= 0 or args.preview_height <= 0
         or not 1 <= args.preview_quality <= 95
     ):
-        raise SystemExit("窗口、周期和视频 FPS 必须大于 0，实时预览 FPS 不能超过 10")
+        raise SystemExit("窗口/周期必须大于 0，重叠必须小于最大窗口，最大窗口不能小于名义窗口，实时预览 FPS 不能超过 10")
 
 
 def load_client_environment() -> None:

@@ -5,7 +5,8 @@ from pathlib import Path
 from realtime_monitor import (
     CHAIN_OUTPUT_SCHEMA, OUTPUT_SCHEMA, ModelResponseValidationError,
     VisualMonitorConfig, VisualMonitorService,
-    normalize_model_json, validate_chain_result, validate_result,
+    normalize_model_json, output_schema_for_window,
+    validate_chain_result, validate_result,
 )
 from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
 
@@ -40,15 +41,16 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("中间步骤只需在窗口内真实发生过", prompt)
         self.assertIn("自行重新拆解", prompt)
         self.assertIn("原始指令：拿起水壶并放到桌子上", prompt)
-        self.assertIn("手正在靠近水壶", prompt)
-        self.assertIn("上一窗口摘要不是本窗口的视觉证据", prompt)
+        self.assertNotIn("手正在靠近水壶", prompt)
+        self.assertIn("不提供上一窗口自由文本观察", prompt)
+        self.assertIn("PREV_NOW", prompt)
         result = {
             "status": "succeeded", "description_zh": "三步均已完成",
-            "task_completion_evidence_timestamp_s": 5.4,
+            "task_completion_evidence_timestamp_s": 6.4,
             "step_updates": [
                 {"step_id": "pick", "status": "succeeded", "description_zh": "拿起", "failure_reason": None, "evidence": [{"timestamp_s": 1.0, "observation": "水壶离开原支撑面"}], "completion_evidence_timestamp_s": 1.0},
                 {"step_id": "carry", "status": "succeeded", "description_zh": "搬运", "failure_reason": None, "evidence": [{"timestamp_s": 2.0, "observation": "水壶被持续手持移动"}], "completion_evidence_timestamp_s": 2.0},
-                {"step_id": "place", "status": "succeeded", "description_zh": "放置", "failure_reason": None, "evidence": [{"timestamp_s": 5.4, "observation": "水壶释放后留在桌面"}], "completion_evidence_timestamp_s": 5.4},
+                {"step_id": "place", "status": "succeeded", "description_zh": "放置", "failure_reason": None, "evidence": [{"timestamp_s": 6.4, "observation": "水壶释放后留在桌面"}], "completion_evidence_timestamp_s": 6.4},
             ],
         }
         self.assertEqual(validate_chain_result(result, assignment)["status"], "succeeded")
@@ -159,7 +161,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
             "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"}
         }, 1)
         self.assertIn("目标物底部", prompt)
-        self.assertIn("随后 6 秒视频", prompt)
+        self.assertIn("随后 7 秒连续视频", prompt)
         self.assertIn("NOW 画面中已经放回", prompt)
         self.assertIn("窗口中途曾经满足、但结尾已不满足", prompt)
         self.assertIn("最后 1 秒", prompt)
@@ -225,13 +227,13 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "必须是 JSON 对象"):
             validate_chain_result(malformed_chain, assignment)
 
-    def test_result_timestamps_must_stay_inside_six_second_window(self):
+    def test_result_timestamps_must_stay_inside_default_seven_second_window(self):
         with self.assertRaises(ValueError):
             validate_result({
                 "status": "succeeded", "description_zh": "已经完成",
                 "failure_reason": None,
-                "evidence": [{"timestamp_s": 6.3, "observation": "超出窗口"}],
-                "completion_evidence_timestamp_s": 6.3,
+                "evidence": [{"timestamp_s": 7.3, "observation": "超出窗口"}],
+                "completion_evidence_timestamp_s": 7.3,
             })
         with self.assertRaisesRegex(ValueError, "最后 1 秒"):
             validate_result({
@@ -243,10 +245,36 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         valid = validate_result({
             "status": "succeeded", "description_zh": "结尾仍保持拿起",
             "failure_reason": None,
-            "evidence": [{"timestamp_s": 5.5, "observation": "NOW 中水壶仍离开桌面"}],
-            "completion_evidence_timestamp_s": 5.5,
+            "evidence": [{"timestamp_s": 6.5, "observation": "NOW 中水壶仍离开桌面"}],
+            "completion_evidence_timestamp_s": 6.5,
         })
         self.assertEqual(valid["status"], "succeeded")
+
+    def test_dynamic_eleven_second_window_updates_schema_prompt_and_validation(self):
+        schema = output_schema_for_window(11.0, chain_mode=True)
+        self.assertEqual(
+            schema["properties"]["task_completion_evidence_timestamp_s"]["maximum"],
+            11.2,
+        )
+        prompt = build_monitor_prompt({
+            "action_id": "A_001", "logic": 0, "slots": {"obj_a": "水壶"},
+        }, 2, 11.0)
+        self.assertIn("11 秒连续视频", prompt)
+        self.assertIn("10 到 11 秒", prompt)
+        valid = validate_result({
+            "status": "succeeded", "description_zh": "结尾仍被拿起",
+            "failure_reason": None,
+            "evidence": [{"timestamp_s": 10.5, "observation": "水壶仍离开桌面"}],
+            "completion_evidence_timestamp_s": 10.5,
+        }, 11.0)
+        self.assertEqual(valid["status"], "succeeded")
+        with self.assertRaises(ValueError):
+            validate_result({
+                "status": "succeeded", "description_zh": "越界",
+                "failure_reason": None,
+                "evidence": [{"timestamp_s": 11.3, "observation": "超出窗口"}],
+                "completion_evidence_timestamp_s": 11.3,
+            }, 11.0)
 
     def test_action_specific_contracts_share_common_output_rules(self):
         carry = build_monitor_prompt({
@@ -258,6 +286,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前阶段由人类用手执行操作", carry)
         self.assertIn("不得因为机械臂静止", carry)
         self.assertIn("由人手操作所以失败", carry)
+        self.assertIn("transition_event", carry)
 
         place = build_monitor_prompt({
             "action_id": "A_002", "logic": 1,
@@ -266,6 +295,7 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("由该表面承托", place)
         self.assertIn("手已经释放", place)
         self.assertIn("failure_reason 必须为 null", place)
+        self.assertIn("persistent_state", place)
 
         with self.assertRaises(ValueError):
             build_monitor_prompt({
@@ -441,12 +471,12 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                     "status": "succeeded",
                     "description_zh": "水壶在窗口结尾仍位于目标桌面",
                     "failure_reason": None,
-                    "evidence": [{"timestamp_s": 6.0, "observation": "水壶稳定留在桌面"}],
-                    "completion_evidence_timestamp_s": 6.0,
+                    "evidence": [{"timestamp_s": 7.0, "observation": "水壶稳定留在桌面"}],
+                    "completion_evidence_timestamp_s": 7.0,
                 }, {"bailian_total": 10.0}, "qwen3.7-plus", "{}")
 
             service._call_bailian = terminal
-            service._extract_frame = lambda *args: self.fail("6.0s 应直接使用 NOW")
+            service._extract_frame = lambda *args: self.fail("7.0s 应直接使用 NOW")
             baseline = Path(directory) / "before.jpg"
             video = Path(directory) / "window.mp4"
             now = Path(directory) / "now.jpg"

@@ -105,6 +105,8 @@ class VisualTelemetryRequest(BaseModel):
     phase_started_at: str
     window_started_at: str | None = None
     window_ended_at: str | None = None
+    window_duration_s: float | None = Field(default=None, gt=0, le=15.0)
+    camera_lag_s: float | None = Field(default=None, ge=0)
 
 
 class MonitorReportRequest(BaseModel):
@@ -563,14 +565,21 @@ async def upload_visual_checkpoint(
     sequence: int = Form(..., ge=1),
     window_started_at: str = Form(...),
     window_ended_at: str = Form(...),
+    window_duration_s: float = Form(..., gt=0, le=15.0),
     capture_ms: float = Form(..., ge=0),
     encode_ms: float = Form(..., ge=0),
     upload_started_at: str | None = Form(default=None),
     video: UploadFile = File(...),
+    prev_now_image: UploadFile = File(...),
     now_image: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ) -> dict:
     _require_visual_monitor(authorization)
+    measured_window_ms = _elapsed_iso_ms(window_started_at, window_ended_at)
+    if measured_window_ms is None:
+        raise HTTPException(status_code=422, detail="窗口时间戳格式非法")
+    if abs(measured_window_ms / 1000 - window_duration_s) > 0.5:
+        raise HTTPException(status_code=422, detail="window_duration_s 与窗口时间戳不一致")
     assignment = await execution_manager.claim_visual_monitor(camera_id)
     if not assignment or assignment["execution_id"] != execution_id or assignment["attempt_id"] != attempt_id:
         raise HTTPException(status_code=409, detail="Visual Monitor assignment 已过期")
@@ -583,8 +592,9 @@ async def upload_visual_checkpoint(
         raise HTTPException(status_code=409, detail="请先上传 BEFORE baseline")
     try:
         path, size, video_write_ms = await visual_monitor.save_upload(video, ".mp4")
+        prev_now_path, prev_now_size, prev_now_write_ms = await visual_monitor.save_upload(prev_now_image, ".jpg")
         now_path, now_size, now_write_ms = await visual_monitor.save_upload(now_image, ".jpg")
-        write_ms = video_write_ms + now_write_ms
+        write_ms = video_write_ms + prev_now_write_ms + now_write_ms
         visual_monitor.cleanup_expired()
         await execution_manager.begin_visual_checkpoint(
             execution_id,
@@ -603,6 +613,7 @@ async def upload_visual_checkpoint(
                 "phase_started_at": utc_iso(),
                 "window_started_at": window_started_at,
                 "window_ended_at": window_ended_at,
+                "window_duration_s": window_duration_s,
                 "upload_started_at": upload_started_at,
                 "upload_received_at": upload_received_at,
                 "capture_ms": capture_ms,
@@ -616,7 +627,11 @@ async def upload_visual_checkpoint(
                 sequence=sequence,
                 baseline_path=baseline,
                 video_path=path,
+                prev_now_path=prev_now_path,
                 now_path=now_path,
+                window_duration_s=window_duration_s,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
                 client_timings={
                     "capture": capture_ms,
                     "encode": encode_ms,
@@ -639,7 +654,9 @@ async def upload_visual_checkpoint(
             "accepted": True,
             "sequence": sequence,
             "bytes": size,
+            "prev_now_bytes": prev_now_size,
             "now_bytes": now_size,
+            "window_duration_s": window_duration_s,
             "server_write_ms": round(write_ms, 1),
             "in_flight": visual_monitor.in_flight,
             "received_at": utc_iso(),

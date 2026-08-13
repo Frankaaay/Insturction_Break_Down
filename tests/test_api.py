@@ -136,7 +136,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
-        self.assertIn("/app.js?v=completion-evidence-20260813", index)
+        self.assertIn("/app.js?v=continuous-window-20260813", index)
         script = (await self.client.get("/app.js")).text
         self.assertNotIn("人工确认成功", script)
         self.assertIn("VLM 判定成功后将自动进入下一步骤", script)
@@ -230,12 +230,16 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "camera_id": "cam-1", "sequence": "1",
                 "window_started_at": "2026-08-06T00:00:00Z",
                 "window_ended_at": "2026-08-06T00:00:06Z",
+                "window_duration_s": "6",
                 "capture_ms": "6000", "encode_ms": "80",
             }, files={
                 "video": ("window.mp4", b"mp4", "video/mp4"),
+                "prev_now_image": ("prev-now.jpg", b"jpeg-prev", "image/jpeg"),
                 "now_image": ("now.jpg", b"jpeg-now", "image/jpeg"),
             })
             self.assertEqual(checkpoint.status_code, 202)
+            self.assertEqual(checkpoint.json()["window_duration_s"], 6.0)
+            self.assertEqual(checkpoint.json()["prev_now_bytes"], len(b"jpeg-prev"))
             for _ in range(20):
                 if not service.in_flight:
                     break
@@ -332,12 +336,13 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "execution_id": created["execution_id"], "attempt_id": attempt_id,
                 "camera_id": "cam-one", "window_started_at": "2026-08-10T00:00:00Z",
                 "window_ended_at": "2026-08-10T00:00:06Z", "capture_ms": "6000",
-                "encode_ms": "80",
+                "window_duration_s": "6", "encode_ms": "80",
             }
             first = await self.client.post(
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "1"},
                 files={
                     "video": ("one.mp4", b"mp4", "video/mp4"),
+                    "prev_now_image": ("prev-one.jpg", b"jpeg-prev", "image/jpeg"),
                     "now_image": ("now-one.jpg", b"jpeg-now", "image/jpeg"),
                 },
             )
@@ -345,6 +350,7 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
                 "/api/visual-monitor/checkpoints", data={**form, "sequence": "2"},
                 files={
                     "video": ("two.mp4", b"mp4", "video/mp4"),
+                    "prev_now_image": ("prev-two.jpg", b"jpeg-prev", "image/jpeg"),
                     "now_image": ("now-two.jpg", b"jpeg-now", "image/jpeg"),
                 },
             )

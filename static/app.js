@@ -9,6 +9,7 @@ let previewSocket = null;
 let previewCameraId = null;
 let previewObjectUrl = null;
 let previewLastFrameAt = 0;
+let previewLatestCapturedAt = 0;
 let previewMeasuredFps = 0;
 let previewArrivalTimes = [];
 let previewReconnectTimer = null;
@@ -89,6 +90,7 @@ function closeLivePreview() {
   previewSocket = null;
   previewCameraId = null;
   previewLastFrameAt = 0;
+  previewLatestCapturedAt = 0;
   previewMeasuredFps = 0;
   previewArrivalTimes = [];
   if (socket) socket.close();
@@ -134,6 +136,7 @@ function syncLivePreview() {
         / Math.max(1, arrival - previewArrivalTimes[0]);
     }
     previewLastFrameAt = arrival;
+    previewLatestCapturedAt = capturedAt;
     const oldUrl = previewObjectUrl;
     previewObjectUrl = URL.createObjectURL(new Blob([packet.slice(12)], { type: "image/jpeg" }));
     const currentImage = $("#livePreviewImage");
@@ -358,6 +361,8 @@ function pipelineMarkup(visual, latest) {
       <span id="pipelineEncode">编码 ${timings.encode != null ? `${esc(Math.round(timings.encode))} ms` : "--"}</span>
       <span id="pipelineUpload">上传 ${timings.upload_to_server != null ? `${esc(Math.round(timings.upload_to_server))} ms` : "--"}</span>
       <span id="pipelineApi">百炼 ${timings.bailian_total != null ? `${esc((timings.bailian_total / 1000).toFixed(1))} s` : "--"}</span>
+      <span id="pipelineWindow">动态窗口 --</span>
+      <span id="pipelineLag">模型落后画面 --</span>
     </div>
   </div>`;
 }
@@ -366,8 +371,9 @@ function updatePipelineClock() {
   const pipeline = currentVisualMonitor()?.pipeline;
   const panel = document.querySelector(".pipeline-panel");
   if (!pipeline || !panel) return;
+  const configuredDurationSeconds = Number(pipeline.window_duration_s || 7);
   const phaseLabels = {
-    capturing: "正在采集 6 秒窗口", encoding: "正在编码视频", uploading: "正在上传服务器",
+    capturing: `正在采集 ${configuredDurationSeconds.toFixed(1)} 秒窗口`, encoding: "正在编码视频", uploading: "正在上传服务器",
     inferencing: "百炼正在判断", completed: "本轮判断完成", error: "本轮判断失败",
   };
   const started = Date.parse(pipeline.phase_started_at || "");
@@ -380,12 +386,20 @@ function updatePipelineClock() {
   const windowStart = Date.parse(pipeline.window_started_at || "");
   const windowEnd = Date.parse(pipeline.window_ended_at || "");
   const windowDuration = Number.isFinite(windowStart) && Number.isFinite(windowEnd)
-    ? Math.max(1, windowEnd - windowStart) : 6000;
+    ? Math.max(1, windowEnd - windowStart) : configuredDurationSeconds * 1000;
   const capturedMs = pipeline.phase === "capturing"
     ? Math.min(windowDuration, Math.max(0, Date.now() - windowStart))
     : Number(pipeline.capture_ms ?? windowDuration);
   if ($("#pipelineCapture")) {
     $("#pipelineCapture").textContent = `采集 ${(Math.min(windowDuration, capturedMs) / 1000).toFixed(1)} / ${(windowDuration / 1000).toFixed(1)} s`;
+  }
+  if ($("#pipelineWindow")) {
+    $("#pipelineWindow").textContent = `动态窗口 ${(windowDuration / 1000).toFixed(1)} s`;
+  }
+  if ($("#pipelineLag")) {
+    const cameraHead = previewLatestCapturedAt || Date.now();
+    const lagMs = Number.isFinite(windowEnd) ? Math.max(0, cameraHead - windowEnd) : 0;
+    $("#pipelineLag").textContent = `模型落后画面 ${(lagMs / 1000).toFixed(1)} s`;
   }
   const progress = pipeline.phase === "capturing"
     ? Math.min(100, capturedMs / windowDuration * 100)
@@ -442,7 +456,7 @@ function visualMonitorControls(step, attempt, chainMode, visual) {
     ${pipelineMarkup(visual, chainLatest)}
     <div class="visual-status ${esc(latest?.status || "waiting")}">${esc(statusLabel)}</div>
     <div class="monitor-action">${esc(step.zh)}</div>
-    <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "同一个 6 秒窗口会联合判断整条原子操作链，并可一次推进多个连续步骤。" : "本地客户端每 6 秒上传一个完整 6 秒窗口，并触发一次百炼判断。"))}</div>
+    <div class="monitor-sub">${esc(latest?.description_zh || (chainMode ? "连续动态窗口会联合判断整条原子操作链，并可跨窗口推进多个连续步骤。" : "本地客户端以 7 秒为名义周期上传连续动态窗口，并触发一次百炼判断。"))}</div>
     ${outcomeEvidence}
     ${evidenceImage}
     ${controls}

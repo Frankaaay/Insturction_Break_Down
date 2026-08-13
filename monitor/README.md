@@ -24,6 +24,15 @@ only adapts `sensor_msgs/msg/Image`. Its small dependency set is in
 `requirements-ros2-camera.txt`. See the repository root README for `probe` and
 continuous `run` commands.
 
+The live client uses a gap-free coverage cursor. Its first window covers 7
+seconds; later requests begin one second before the last accepted window ended
+and extend to the newest camera frame. A request is capped at 15 seconds, so a
+larger backlog is recovered as consecutive overlapping chunks instead of being
+dropped. Only one checkpoint is uploaded for an assignment at a time. Each
+checkpoint contains `CHAIN_BEFORE`, `PREV_NOW`, the dynamic H.264 window, and
+`CURRENT_NOW`; `window_duration_s` drives the Prompt, JSON Schema, timestamp
+validation, and evidence extraction.
+
 Prototype for testing whether a vision-language model can monitor short robot
 manipulation clips and decide whether an atomic operation is on track,
 successful, risky, or failed.

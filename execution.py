@@ -558,6 +558,9 @@ class ExecutionManager:
                 "pipeline": {
                     "phase": "completed", "sequence": latest.get("sequence"),
                     "phase_started_at": latest.get("observed_at") or _iso(),
+                    "window_started_at": latest.get("window_started_at"),
+                    "window_ended_at": latest.get("window_ended_at"),
+                    "window_duration_s": latest.get("window_duration_s"),
                     "timings_ms": copy.deepcopy(latest.get("timings_ms", {})),
                 },
             })
@@ -696,6 +699,9 @@ class ExecutionManager:
                 "pipeline": {
                     "phase": "completed", "sequence": latest.get("sequence"),
                     "phase_started_at": latest.get("observed_at") or _iso(),
+                    "window_started_at": latest.get("window_started_at"),
+                    "window_ended_at": latest.get("window_ended_at"),
+                    "window_duration_s": latest.get("window_duration_s"),
                     "timings_ms": copy.deepcopy(latest.get("timings_ms", {})),
                 },
             })

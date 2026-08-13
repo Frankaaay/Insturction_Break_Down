@@ -6,7 +6,8 @@ import numpy as np
 
 from monitor.camera_monitor_client import (
     LivePreviewSender, MonitorClient, assignment_identity,
-    checkpoint_block_reason, parser, sample_fixed_window, sample_window,
+    checkpoint_block_reason, continuous_window_bounds, parser,
+    sample_fixed_window, sample_window,
     uploads_paused,
 )
 from monitor.ros2_camera_client import (
@@ -48,10 +49,12 @@ class FakeHttpClient:
 
 
 class CameraMonitorClientTests(unittest.TestCase):
-    def test_default_window_and_submission_cycle_are_both_six_seconds(self):
+    def test_default_window_and_submission_cycle_are_both_seven_seconds(self):
         args = parser().parse_args(["probe"])
-        self.assertEqual(args.window_seconds, 6.0)
-        self.assertEqual(args.cycle_seconds, 6.0)
+        self.assertEqual(args.window_seconds, 7.0)
+        self.assertEqual(args.cycle_seconds, 7.0)
+        self.assertEqual(args.overlap_seconds, 1.0)
+        self.assertEqual(args.max_window_seconds, 15.0)
         self.assertEqual(args.assignment_poll_seconds, 1.0)
         self.assertEqual(args.preview_fps, 10.0)
         self.assertEqual((args.preview_width, args.preview_height), (640, 352))
@@ -112,7 +115,7 @@ class CameraMonitorClientTests(unittest.TestCase):
             "server inference still running",
         )
         self.assertEqual(
-            checkpoint_block_reason({"monitor_state": "observing"}, 2),
+            checkpoint_block_reason({"monitor_state": "observing"}, 1),
             "local upload slots busy",
         )
         self.assertIsNone(checkpoint_block_reason({"monitor_state": "observing"}, 0))
@@ -153,6 +156,18 @@ class CameraMonitorClientTests(unittest.TestCase):
         )
         selected = sample_window(frames, 0.0, 6.0, fps=6)
         self.assertEqual(len(selected), 36)
+
+    def test_continuous_cursor_expands_slow_followup_without_gap(self):
+        self.assertEqual(continuous_window_bounds(0.0, 0.0, 7.0), (0.0, 7.0))
+        self.assertEqual(continuous_window_bounds(0.0, 7.0, 17.0), (6.0, 17.0))
+
+    def test_continuous_cursor_caps_backlog_and_next_chunk_overlaps(self):
+        self.assertEqual(continuous_window_bounds(0.0, 20.0, 42.0), (19.0, 34.0))
+        self.assertEqual(continuous_window_bounds(0.0, 34.0, 42.0), (33.0, 42.0))
+
+    def test_eleven_second_dynamic_window_has_sixty_six_frames(self):
+        frames = deque((index / 30, index) for index in range(331))
+        self.assertEqual(len(sample_window(frames, 0.0, 11.0, fps=6)), 66)
 
     def test_probe_window_is_full_length_after_discovery_delay(self):
         frames = deque(

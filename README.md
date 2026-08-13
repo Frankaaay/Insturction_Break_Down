@@ -23,7 +23,7 @@
 - **执行闭环**:拆解结果可创建后端执行会话,由虚拟 Monitor 或真机通过同一接口上报成功/失败
 - **GraspArm 子流程**:`A_001 Pick` 可由 arm X5 Agent 领取；网页按 Agent YAML 动态展示内部 DAG、服务健康、运行阶段和失败日志
 - **服务端超时**:每个原子操作默认等待 20 秒,失败或超时自动重试,连续 3 次后暂停等待人工处理
-- **ROS2 Camera Visual Monitor**:支持原子视觉与整链视觉；机器人客户端每 6 秒上传一个完整 6 秒 RGB 视频窗口，服务器调用百炼并通过 SSE 展示观察结果
+- **ROS2 Camera Visual Monitor**:支持原子视觉与整链视觉；机器人客户端以 7 秒为名义周期上传无缺口的动态 RGB 视频窗口，服务器调用百炼并通过 SSE 展示观察结果
 
 ## 快速开始
 
@@ -68,7 +68,7 @@ ARM ROS2 topic       ── planner-monitor-ros2-camera.service
 
 当前验证过的环境是 ROS2 Humble、Python 3、FFmpeg，以及头部左相机原生
 `640×352` BGR8 图像。客户端默认从原图裁取 `x=160..480、y=92..308` 的
-`320×216` 中央操作区域；BEFORE、6 秒视频、NOW 和实时预览使用完全相同的
+`320×216` 中央操作区域；CHAIN_BEFORE、动态视频、PREV_NOW、CURRENT_NOW 和实时预览使用完全相同的
 ROI。下面的命令都从仓库根目录执行。
 
 #### 1. 在 ARM 安装代码和依赖
@@ -150,7 +150,7 @@ cd /root/workspace/planner_monitor
 .venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-另开一个 ARM 终端运行 probe。它采集完整 6 秒、编码 36 帧 H.264 MP4并上传，
+另开一个 ARM 终端运行 probe。它按默认配置采集完整 7 秒、编码 42 帧 H.264 MP4并上传，
 但不会调用百炼：
 
 ```bash
@@ -160,10 +160,10 @@ source /opt/ros/humble/setup.bash
 ```
 
 输出应包含 `source_resolution=[320,216]`、`frame_count_captured`、
-`frame_count_uploaded=36`、`capture_ms`、`encode_ms`、
+`frame_count_uploaded=42`、`capture_ms`、`encode_ms`、
 `client_upload_roundtrip_ms`、`server_write_ms` 和 `local_file_bytes`。当前实机基线
-输入是从原生 `640×352` 裁取的 `320×216` ROI、6 FPS、6 秒；`capture_ms` 应
-接近 6000 ms。`--no-proxy` 只表示
+输入是从原生 `640×352` 裁取的 `320×216` ROI、6 FPS、7 秒；`capture_ms` 应
+接近 7000 ms。`--no-proxy` 只表示
 Python HTTP 客户端忽略 `HTTP_PROXY/HTTPS_PROXY`，不会改变 ROS2 或底盘转发。
 
 #### 5. 安装 ARM systemd 服务
@@ -247,22 +247,20 @@ journalctl -u planner-monitor-lan-forward.service -n 100 --no-pager
 `--crop-x 160 --crop-y 92 --crop-width 320 --crop-height 216`。裁切发生在统一
 采集入口，不做放大，因此 BEFORE、VLM 视频、NOW 和实时预览不会出现范围不一致。
 修改 ROI 后必须重新运行 probe；ROI 必须位于原图内，宽高必须为偶数。VLM 视频
-降采样为6 FPS、H.264 CRF 28，每积累完整6秒便提交这6秒窗口，默认窗口和提交
-周期均为6秒。独立线程每1秒领取一次当前 assignment，编码和上传也在线程中进行，
+降采样为6 FPS、H.264 CRF 28，默认名义窗口和新覆盖周期均为7秒。独立线程每1秒领取一次当前 assignment，编码和上传也在线程中进行，
 因此ROS回调不会等待网络。每次切换步骤都会生成新的generation、清空旧帧、重拍
-BEFORE并重新积累完整6秒窗口；旧generation的上传结果会被忽略。如果检查点到期
-时百炼仍在推理或本地上传槽繁忙，客户端每0.5秒重试并使用最新滚动窗口。VLM返回
+CHAIN_BEFORE并重新积累首个7秒窗口；旧generation的上传结果会被忽略。客户端只允许一个上传/推理请求占用当前 assignment。已被服务端接受的窗口结束时间是连续覆盖游标；如果百炼耗时超过7秒，下一段从上一结束点前1秒开始，一直覆盖到最新帧。单段最长15秒，积压更长时拆成连续的15秒片段逐段追回，不会改成“只取最新7秒”而漏掉推理期间的动作。每次请求还上传上一窗口结尾的 PREV_NOW，帮助模型连接跨窗口状态。VLM返回
 `succeeded`时后端自动推进；返回`failed`时暂停等待人工确认。
 
-整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端已确认步骤、当前及后续未完成步骤，以及上一窗口的逐步骤观察摘要。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。第一个窗口没有完成的动作可以在后续窗口继续判断，已确认成功的步骤进入跨窗口账本且不会回退。上一窗口摘要只作时序参考，不能替代当前窗口证据。中间步骤可在窗口内短暂完成后继续下一步，最终步骤仍必须在 NOW 中成立。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
+整链视觉模式仍使用 Planner 生成的稳定步骤 ID，但每次 Prompt 同时包含原始指令、完整动作契约、后端已确认步骤、当前及后续未完成步骤。模型业务状态只有 `succeeded`、`in_progress`、`failed`：遮挡、画质或身份无法确认也返回 `in_progress`，并在描述中写明原因。模型只返回从当前步骤开始的连续前缀，并在第一个 `in_progress` 或 `failed` 处停止；不再为更后面的未执行步骤输出空 evidence 占位结果。后端只接受连续成功前缀，因此一个窗口可以推进多个步骤，但不能跳步、回退或越过失败。第一个窗口没有完成的动作可以在后续窗口继续判断，已确认成功的步骤进入跨窗口账本且不会回退。Prompt 不再回灌上一轮 `in_progress` 的自由文本描述，跨窗口只依赖步骤账本、PREV_NOW、1秒重叠视频和当前窗口证据。Pick 使用 transition_or_state、Carry 使用 transition_event、Place 使用 persistent_state 的动作时间语义；最后步骤仍必须在 CURRENT_NOW 中成立。百炼偶发返回单元素对象数组时会有限解包；其他异常结构仍严格拒绝。服务端同时保存原始响应、标准化 JSON 和验证错误，便于区分模型判断问题和输出契约问题。
 
 同一采集循环还会分出独立实时预览：目标上限为10 FPS、默认 `320×216` ROI、
 JPEG quality 65，通过二进制WebSocket上传，不使用Base64；实际FPS不会超过ROS2
 相机真实发布频率。服务端和每个网页订阅者都只保留最新一帧，慢连接覆盖旧帧，
 不会阻塞相机或VLM。网页显示最近2秒实际收到的预览FPS和采集到展示的延迟。
-VLM进入等待人工确认后，6秒窗口和百炼请求暂停，但实时预览继续。
+VLM进入等待人工确认后，动态窗口和百炼请求暂停，但实时预览继续。网页会显示本轮实际窗口长度和模型相对实时画面的落后时间。
 
-每个 VLM 检查点上传 `BEFORE`、6 秒 H.264 视频和独立 `NOW` 结尾帧。状态以 NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后 1 秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
+每个 VLM 检查点上传 `CHAIN_BEFORE`、`PREV_NOW`、7～15 秒动态 H.264 视频和独立 `CURRENT_NOW` 结尾帧。实际 `window_duration_s` 同步驱动 Prompt、严格 JSON Schema、时间戳校验和完成证据提取，不再写死6秒。最终状态以 CURRENT_NOW 为准：窗口中途曾达到成功条件、但结尾已不满足时不能返回 `succeeded`；完成证据必须位于窗口最后1秒。以 Pick 为例，拿起后又放回原支撑面属于 `in_progress`。
 
 公网部署需要为 `/api/visual-monitor/live/` 转发 WebSocket Upgrade；当前服务器配置模板见 `deploy/nginx-instruction-breakdown.conf`。观看端使用 `OPERATOR_TOKEN`、采集端使用 `VISUAL_MONITOR_TOKEN`，认证消息在 WebSocket 建立后通过 TLS 发送，不放入 URL。
 
@@ -286,7 +284,7 @@ HTTP API(供其他程序调用):
 - `POST /api/agent/complete` — 幂等提交 `succeeded`、`failed` 或 `needs_operator`
 - `POST /api/visual-monitor/claim` — ROS2相机客户端领取当前视觉Monitor任务
 - `POST /api/visual-monitor/baseline` — 上传操作开始前的 JPEG
-- `POST /api/visual-monitor/checkpoints` — 上传 6 秒 H.264 检查窗口并异步触发百炼
+- `POST /api/visual-monitor/checkpoints` — 上传动态 H.264 窗口、PREV_NOW/CURRENT_NOW 和实际时长并异步触发百炼
 - `POST /api/visual-monitor/upload-probe` — 只测采集/编码/上传，不请求模型
 
 Monitor 上报示例（`step_id` 与 `attempt_id` 从执行快照或 `step.started` 事件获得）:
