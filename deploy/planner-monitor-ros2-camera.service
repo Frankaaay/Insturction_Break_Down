@@ -7,6 +7,8 @@ After=network-online.target planner-monitor-web.service
 Type=simple
 WorkingDirectory=/root/workspace/planner_monitor
 EnvironmentFile=/root/workspace/planner_monitor/.env
+Environment=HOME=/root
+Environment=ROS_LOG_DIR=/root/.ros/log/planner-monitor
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec /root/workspace/planner_monitor/.venv/bin/python -m monitor.ros2_camera_client run'
 Restart=on-failure
 RestartSec=2
