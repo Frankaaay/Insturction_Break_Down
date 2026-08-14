@@ -496,6 +496,9 @@ failed 边界：
 时序与状态规则：
 - 只评估尚未由后端确认的步骤。step_updates 必须从当前步骤开始，按顺序返回未确认后缀 {pending_ids} 的连续前缀。
 - 一旦遇到第一个 in_progress 或 failed 就停止输出，不要再为更后面的尚未执行步骤生成占位结果。只有前面的步骤都 succeeded 才能继续输出下一步。
+- 每个尚未确认的 Step 都必须由本次 CURRENT_WINDOW 或 CURRENT_NOW 中属于该 Step 自身的直接视觉证据支持。看到后续动作或后续状态，不等于在本窗口看到了前序动作；禁止根据动作链的逻辑先后关系反推前序 Step 已完成。
+- 特别地，看到正在 Wipe、Place 或执行其他后续动作，不能据此编造本窗口中曾出现 Pick 或 Carry。若当前 Step 的明确动作证据不在本窗口，即使后续动作看起来已经开始，也必须只返回当前 Step=in_progress，并在 description_zh 中说明“当前窗口缺少该步骤的直接完成证据”；不得输出后续 Step。
+- 不得把发生在本窗口开始之前的动作虚构到 0.0 秒附近，也不得为未直接看到的动作补写时间戳、运动过程或完成画面。
 - 不得重复输出已确认步骤，也不得跳步、自行重新拆解、改名或重排步骤。
 - 后端标记 succeeded 的历史 Step 是权威事实，并有对应冻结关键帧；不得重新判断、否认或回退，也不得在 description_zh、failure_reason 或 evidence 中声称这些前置 Step 尚未完成。
 - 只从当前执行 Step 开始判断。当前为 Place 时，如果 Pick/Carry 已由后端确认，禁止回答“尚未拿起”“尚未搬运”或语义等价内容；只判断目标物是否已经稳定位于指定表面、是否仍由手支撑、表面身份是否可确认。
@@ -512,7 +515,8 @@ failed 边界：
 
 输出规则：
 - step_updates 至少包含当前 step_id，并且只能是未确认后缀的连续前缀。
-- evidence 只写直接可见事实，不写隐藏推理、意图、控制建议或 decision。
+- evidence 只写直接可见事实，不写隐藏推理、意图、控制建议或 decision。返回前逐条检查：把视频冻结在该 timestamp_s 时，单张画面必须与 observation 的物体、接触关系、位置和状态一致；如果冻结帧不能支持这句话，就不能使用该时间点和描述。
+- evidence 的 observation 不得把“由后续状态推测此前发生过”写成当前帧事实。例如当前帧正在擦拭时，可以写“纸巾正由手按压在桌面上”，不能写“纸巾刚被完全拿起并稳定握持在空中”。
 - 所有时间戳相对本次 {duration} 秒 WINDOW 开头，范围 0 到 {duration} 秒。
 - 中间步骤 succeeded 的 completion_evidence_timestamp_s 可位于窗口任意时刻。
 - {final_completion_rule}

@@ -49,6 +49,11 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不存在任何历史视频", prompt)
         self.assertIn("一张 HISTORY_STEP_KEYFRAME", prompt)
         self.assertNotIn("PREV_NOW", prompt)
+        self.assertIn("禁止根据动作链的逻辑先后关系反推前序 Step 已完成", prompt)
+        self.assertIn("当前窗口缺少该步骤的直接完成证据", prompt)
+        self.assertIn("不得把发生在本窗口开始之前的动作虚构到 0.0 秒附近", prompt)
+        self.assertIn("冻结在该 timestamp_s", prompt)
+        self.assertIn("不能写“纸巾刚被完全拿起并稳定握持在空中”", prompt)
         result = {
             "status": "succeeded", "description_zh": "三步均已完成",
             "task_completion_evidence_timestamp_s": 6.4,
