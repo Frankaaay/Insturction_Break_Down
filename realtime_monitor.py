@@ -467,21 +467,38 @@ class VisualMonitorService:
                 result, timings, actual_model, raw, response_diagnostics = call_result
             chain_mode = assignment.get("monitor_scope") == "chain"
             evidence_url = None
-            if chain_mode:
-                for item in result["step_updates"]:
-                    completion = item.get("completion_evidence_timestamp_s")
-                    if completion is not None:
-                        item["completion_evidence_url"] = await self._completion_evidence_url(
-                            job["video_path"], job["now_path"], float(completion),
-                            job["window_duration_s"],
-                        )
-            else:
-                completion = result.get("completion_evidence_timestamp_s")
-                if completion is not None:
-                    evidence_url = await self._completion_evidence_url(
-                        job["video_path"], job["now_path"], float(completion),
+            evidence_frame_urls: dict[str, str] = {}
+
+            async def evidence_frame_url(timestamp: float) -> str:
+                cache_key = f"{timestamp:.3f}"
+                if cache_key not in evidence_frame_urls:
+                    evidence_frame_urls[cache_key] = await self._completion_evidence_url(
+                        job["video_path"], job["now_path"], timestamp,
                         job["window_duration_s"],
                     )
+                return evidence_frame_urls[cache_key]
+
+            async def attach_evidence_frames(evidence: list[dict[str, Any]]) -> None:
+                for entry in evidence:
+                    try:
+                        entry["image_url"] = await evidence_frame_url(float(entry["timestamp_s"]))
+                    except (RuntimeError, OSError, subprocess.SubprocessError):
+                        # Timeline images are supplemental UI evidence. A single
+                        # failed extraction must not discard an otherwise valid
+                        # in-progress or failed VLM observation.
+                        entry["image_error"] = "证据帧提取失败"
+
+            if chain_mode:
+                for item in result["step_updates"]:
+                    await attach_evidence_frames(item.get("evidence") or [])
+                    completion = item.get("completion_evidence_timestamp_s")
+                    if completion is not None:
+                        item["completion_evidence_url"] = await evidence_frame_url(float(completion))
+            else:
+                await attach_evidence_frames(result.get("evidence") or [])
+                completion = result.get("completion_evidence_timestamp_s")
+                if completion is not None:
+                    evidence_url = await evidence_frame_url(float(completion))
             latest = {
                 **result,
                 "sequence": job["sequence"],

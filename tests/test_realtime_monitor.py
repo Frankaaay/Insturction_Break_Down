@@ -641,6 +641,10 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                     "/api/visual-monitor/media/"
                 )
             )
+            self.assertEqual(
+                successes[0]["latest"]["evidence"][0]["image_url"],
+                successes[0]["latest"]["completion_evidence_url"],
+            )
             await service.close()
 
     async def test_end_boundary_completion_uses_now_image(self):
@@ -690,6 +694,10 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
             self.assertEqual(
                 successes[0]["latest"]["completion_evidence_url"],
+                f"/api/visual-monitor/media/{now.name}",
+            )
+            self.assertEqual(
+                successes[0]["latest"]["evidence"][0]["image_url"],
                 f"/api/visual-monitor/media/{now.name}",
             )
             await service.close()
@@ -751,7 +759,13 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 import asyncio
                 await asyncio.sleep(0.01)
             self.assertEqual(chain_results[0]["attempt_id"], "chain-session")
-            self.assertEqual(chain_results[0]["latest"]["step_updates"][0]["completion_evidence_url"].startswith("/api/visual-monitor/media/"), True)
+            updates = chain_results[0]["latest"]["step_updates"]
+            self.assertTrue(updates[0]["completion_evidence_url"].startswith("/api/visual-monitor/media/"))
+            self.assertEqual(
+                updates[0]["evidence"][0]["image_url"],
+                updates[0]["completion_evidence_url"],
+            )
+            self.assertTrue(updates[1]["evidence"][0]["image_url"].startswith("/api/visual-monitor/media/"))
             await service.close()
 
     async def test_validation_failure_persists_raw_model_response(self):

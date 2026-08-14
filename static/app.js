@@ -554,28 +554,39 @@ function eventDescription(event) {
   const actualModel = observation.model_actual;
   const model = actualModel && requestedModel && actualModel !== requestedModel
     ? `${requestedModel} → ${actualModel}` : actualModel || requestedModel;
-  const evidenceList = (observation.evidence || []).map((item) =>
-    `<li><span>${esc(Number(item.timestamp_s).toFixed(1))}s</span>${esc(item.observation)}</li>`
-  ).join("");
+  const evidenceList = renderEventEvidence(observation.evidence || []);
   const stepUpdates = (observation.step_updates || []).map((item) => {
     const step = execution.steps.find((candidate) => candidate.step_id === item.step_id);
     const stepStatus = { succeeded: "成功", in_progress: "执行中", failed: "失败", unknown: "执行中" }[item.status] || item.status;
-    const evidence = (item.evidence || []).map((entry) =>
-      `<li><span>${esc(Number(entry.timestamp_s).toFixed(1))}s</span>${esc(entry.observation)}</li>`
-    ).join("");
+    const evidence = renderEventEvidence(item.evidence || []);
     return `<div class="event-step-result ${esc(item.status)}">
       <div><strong>${esc(step?.zh || item.step_id)}</strong><em>${esc(stepStatus)}</em></div>
       <p>${esc(item.description_zh || "无描述")}</p>
       ${item.failure_reason ? `<div class="event-reason">${esc(item.failure_reason)}</div>` : ""}
-      ${evidence ? `<ul>${evidence}</ul>` : ""}
+      ${evidence}
     </div>`;
   }).join("");
   return `<div class="event-result-head"><b>VLM 判断：${esc(statusText)}</b>${sequence != null ? `<span>#${esc(sequence)}</span>` : ""}${model ? `<span>${esc(model)}</span>` : ""}</div>
     <p class="event-description">${esc(observation.description_zh || data.detail || (event.type.endsWith(".error") ? "VLM 请求或结果解析失败" : "旧日志未保存详细描述"))}</p>
     ${observation.failure_reason ? `<div class="event-reason">${esc(observation.failure_reason)}</div>` : ""}
     ${observation.error ? `<div class="event-reason">技术错误：${esc(observation.error)}</div>` : ""}
-    ${evidenceList ? `<ul class="event-evidence">${evidenceList}</ul>` : ""}
+    ${evidenceList}
     ${stepUpdates}`;
+}
+
+function renderEventEvidence(evidence) {
+  if (!evidence.length) return "";
+  return `<div class="event-evidence">${evidence.map((item) => {
+    const timestamp = Number(item.timestamp_s);
+    const timestampLabel = Number.isFinite(timestamp) ? `${timestamp.toFixed(1)}s` : "--";
+    const image = item.image_url
+      ? `<div class="event-evidence-image"><img loading="lazy" src="${esc(item.image_url)}" alt="${esc(timestampLabel)} 视觉证据帧"></div>`
+      : `<div class="event-evidence-missing">${esc(item.image_error || "该历史记录没有保存对应图像")}</div>`;
+    return `<details class="event-evidence-point">
+      <summary><span>${esc(timestampLabel)}</span><strong>${esc(item.observation)}</strong><em>查看图像</em></summary>
+      ${image}
+    </details>`;
+  }).join("")}</div>`;
 }
 
 function visualEvents() {
@@ -652,16 +663,18 @@ function renderExecution() {
       <div class="progress-row"><div class="progress-track"><div class="progress-bar" style="width:${percentage}%"></div></div><span class="progress-copy">${progress.succeeded} / ${progress.total} · ${percentage}%</span></div>
     </section>
     <div class="execution-grid fade-in">
-      <section class="chain-card">
-        <div class="card-heading"><h3>原子操作链</h3><span>${execution.steps.length} 个步骤</span></div>
-        <div class="execution-steps">${execution.steps.map(renderStep).join("")}</div>
-      </section>
+      <div class="execution-main-column">
+        <section class="chain-card">
+          <div class="card-heading"><h3>原子操作链</h3><span>${execution.steps.length} 个步骤</span></div>
+          <div class="execution-steps">${execution.steps.map(renderStep).join("")}</div>
+        </section>
+        <details class="log-card">
+          <summary class="card-heading"><h3>VLM 判断日志</h3><span>${visualEvents().length} 次判断 · 点击展开</span></summary>
+          <div class="event-list">${renderEvents()}</div>
+        </details>
+      </div>
       <aside class="monitor-card"><div class="card-heading"><h3>Monitor 控制台</h3><span>后端权威</span></div><div class="monitor-body">${monitorControls()}</div></aside>
-    </div>
-    <details class="log-card fade-in">
-      <summary class="card-heading"><h3>VLM 判断日志</h3><span>${visualEvents().length} 次判断 · 点击展开</span></summary>
-      <div class="event-list">${renderEvents()}</div>
-    </details>`;
+    </div>`;
   updateCountdown();
   updatePipelineClock();
   syncLivePreview();
