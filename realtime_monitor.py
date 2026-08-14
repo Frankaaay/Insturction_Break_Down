@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 
 from execution import ExecutionConflictError
-from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
+from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt, get_visual_contract
 
 
 BAILIAN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -184,7 +184,10 @@ def normalize_model_json(value: Any) -> tuple[dict[str, Any], list[str]]:
 
 def validate_result(
     value: dict[str, Any], window_duration_s: float = MONITOR_WINDOW_SECONDS,
+    terminal_evidence_policy: str = "current_now",
 ) -> dict[str, Any]:
+    if terminal_evidence_policy not in {"current_now", "event_in_window"}:
+        raise ValueError("动作终态证据策略非法")
     timestamp_max, success_evidence_min, _ = _window_limits(window_duration_s)
     required = {
         "status", "description_zh", "failure_reason", "evidence",
@@ -205,7 +208,7 @@ def validate_result(
     if status == "succeeded":
         if not isinstance(completion, (int, float)) or not 0 <= completion <= timestamp_max:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
-        if completion < success_evidence_min:
+        if terminal_evidence_policy == "current_now" and completion < success_evidence_min:
             raise ValueError("succeeded 的完成证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
@@ -231,8 +234,11 @@ def validate_result(
 
 def _validate_observation_fields(
     value: dict[str, Any], *, final_step: bool = False,
+    terminal_evidence_policy: str = "current_now",
     window_duration_s: float = MONITOR_WINDOW_SECONDS,
 ) -> None:
+    if terminal_evidence_policy not in {"current_now", "event_in_window"}:
+        raise ValueError("动作终态证据策略非法")
     timestamp_max, success_evidence_min, _ = _window_limits(window_duration_s)
     status = value.get("status")
     if status not in {"in_progress", "succeeded", "failed"}:
@@ -247,7 +253,11 @@ def _validate_observation_fields(
     if status == "succeeded":
         if not isinstance(completion, (int, float)) or not 0 <= completion <= timestamp_max:
             raise ValueError("succeeded 必须给出窗口内完成证据时间")
-        if final_step and completion < success_evidence_min:
+        if (
+            final_step
+            and terminal_evidence_policy == "current_now"
+            and completion < success_evidence_min
+        ):
             raise ValueError("最终步骤成功证据必须位于窗口最后 1 秒")
     elif completion is not None:
         raise ValueError("非 succeeded 状态的完成证据时间必须为 null")
@@ -278,6 +288,13 @@ def validate_chain_result(
         raise ValueError("整链模型 JSON 字段与契约不一致")
     all_steps = assignment.get("steps", [])
     current_index = int(assignment.get("current_step_index", 0))
+    final_contract = None
+    if all_steps:
+        final_step = all_steps[-1]
+        final_contract = get_visual_contract(final_step.get("action_id"), final_step.get("logic"))
+    final_evidence_policy = (
+        final_contract.terminal_evidence_policy if final_contract else "current_now"
+    )
     expected_ids = [step["step_id"] for step in all_steps[current_index:]]
     updates = value.get("step_updates")
     if not isinstance(updates, list) or not updates or len(updates) > len(expected_ids):
@@ -296,6 +313,7 @@ def validate_chain_result(
         _validate_observation_fields(
             item,
             final_step=current_index + index == len(all_steps) - 1,
+            terminal_evidence_policy=final_evidence_policy,
             window_duration_s=window_duration_s,
         )
     if any(item["status"] != "succeeded" for item in updates[:-1]):
@@ -309,7 +327,9 @@ def validate_chain_result(
         raise ValueError("顶层 status 与逐步状态不一致")
     task_completion = value.get("task_completion_evidence_timestamp_s")
     if derived == "succeeded":
-        if not isinstance(task_completion, (int, float)) or not success_evidence_min <= task_completion <= timestamp_max:
+        if not isinstance(task_completion, (int, float)) or not 0 <= task_completion <= timestamp_max:
+            raise ValueError("整链成功证据必须位于当前窗口内")
+        if final_evidence_policy == "current_now" and task_completion < success_evidence_min:
             raise ValueError("整链成功证据必须位于窗口最后 1 秒")
     elif task_completion is not None:
         raise ValueError("非整链成功不得填写任务完成证据时间")
@@ -661,10 +681,17 @@ class VisualMonitorService:
             else:
                 raise ValueError("模型 message.content 必须是 JSON 文本、对象或数组")
             normalized, normalization_applied = normalize_model_json(parsed)
-            result = (
-                validate_chain_result(normalized, assignment, window_duration_s)
-                if chain_mode else validate_result(normalized, window_duration_s)
-            )
+            if chain_mode:
+                result = validate_chain_result(normalized, assignment, window_duration_s)
+            else:
+                contract = get_visual_contract(assignment.get("action_id"), assignment.get("logic"))
+                if not contract:
+                    raise ValueError("当前动作没有 Visual Monitor 动作契约")
+                result = validate_result(
+                    normalized,
+                    window_duration_s,
+                    terminal_evidence_policy=contract.terminal_evidence_policy,
+                )
         except (json.JSONDecodeError, TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
             raise ModelResponseValidationError(
                 str(exc), raw_body=raw_body, actual_model=actual_model, timings_ms=timings,

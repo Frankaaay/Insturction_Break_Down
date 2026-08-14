@@ -8,7 +8,10 @@ from realtime_monitor import (
     normalize_model_json, output_schema_for_window,
     validate_chain_result, validate_result,
 )
-from visual_contracts import build_chain_monitor_prompt, build_monitor_prompt
+from visual_contracts import (
+    build_chain_monitor_prompt, build_monitor_prompt, get_visual_contract,
+    supports_visual_contract,
+)
 
 
 class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
@@ -374,6 +377,123 @@ class RealtimeMonitorContractTests(unittest.IsolatedAsyncioTestCase):
                 "action_id": "A_002", "logic": 0,
                 "slots": {"obj_a": "水壶", "obj_b": "杯子"},
             }, 1)
+
+    def test_new_desktop_action_contracts_are_registered_with_exact_slots(self):
+        expected = {
+            ("A_014", 0): (("obj_a",), "current_now"),
+            ("A_009", 0): (("obj_a", "sur_a"), "event_in_window"),
+            ("A_017", 0): (("obj_a",), "current_now"),
+            ("A_016", 0): (("obj_a",), "current_now"),
+            ("A_010", 0): (("obj_a", "obj_b"), "current_now"),
+        }
+        for key, (slots, policy) in expected.items():
+            with self.subTest(action=key):
+                self.assertTrue(supports_visual_contract(*key))
+                contract = get_visual_contract(*key)
+                self.assertEqual(contract.required_slots, slots)
+                self.assertEqual(contract.terminal_evidence_policy, policy)
+
+    def test_turn_open_close_insert_prompts_define_visible_persistent_results(self):
+        turn = build_monitor_prompt({
+            "action_id": "A_014", "logic": 0, "slots": {"obj_a": "笔记本"},
+        }, 1)
+        self.assertIn("不能把桌面内平移或水平旋转当成翻面", turn)
+        self.assertIn("正反面相似", turn)
+        self.assertIn("最后 1 秒", turn)
+
+        opened = build_monitor_prompt({
+            "action_id": "A_017", "logic": 0, "slots": {"obj_a": "笔记本电脑"},
+        }, 1)
+        self.assertIn("功能性打开状态", opened)
+        self.assertIn("开口、内部空间或可访问区域明确暴露", opened)
+
+        closed = build_monitor_prompt({
+            "action_id": "A_016", "logic": 0, "slots": {"obj_a": "笔记本电脑"},
+        }, 1)
+        self.assertIn("功能性关闭状态", closed)
+        self.assertIn("不要求推断不可见的机械锁扣", closed)
+
+        inserted = build_monitor_prompt({
+            "action_id": "A_010", "logic": 0,
+            "slots": {"obj_a": "马克笔", "obj_b": "笔筒"},
+        }, 1)
+        self.assertIn("开口、插槽或受约束区域", inserted)
+        self.assertIn("放入宽大开放区域不足以证明 Insert", inserted)
+        self.assertIn("手已经释放", inserted)
+
+    def test_wipe_prompt_requires_contact_motion_but_not_cleanliness(self):
+        prompt = build_monitor_prompt({
+            "action_id": "A_009", "logic": 0,
+            "slots": {"obj_a": "白色纸巾", "sur_a": "桌子"},
+        }, 1)
+        self.assertIn("持续接触", prompt)
+        self.assertIn("明确、连续的擦拭位移", prompt)
+        self.assertIn("不要求判断表面已经完全擦干净", prompt)
+        self.assertIn("不要求接触或运动一直保持到 CURRENT_NOW", prompt)
+        self.assertIn("任意时刻（0 到 7 秒）", prompt)
+        self.assertNotIn("completion_evidence_timestamp_s 必须在最后 1 秒", prompt)
+
+    def test_wipe_event_can_complete_early_but_persistent_actions_cannot(self):
+        early_success = {
+            "status": "succeeded",
+            "description_zh": "纸巾与桌面持续接触并完成擦拭",
+            "failure_reason": None,
+            "evidence": [{
+                "timestamp_s": 2.4,
+                "observation": "纸巾贴着桌面连续向左再向右移动",
+            }],
+            "completion_evidence_timestamp_s": 2.4,
+        }
+        self.assertEqual(
+            validate_result(
+                early_success, terminal_evidence_policy="event_in_window",
+            )["status"],
+            "succeeded",
+        )
+        with self.assertRaisesRegex(ValueError, "最后 1 秒"):
+            validate_result(early_success, terminal_evidence_policy="current_now")
+
+    def test_chain_wipe_final_accepts_early_event_evidence(self):
+        assignment = {
+            "instruction": "用纸巾擦桌子",
+            "current_step_index": 0,
+            "current_step_id": "wipe",
+            "confirmed_steps": [],
+            "steps": [{
+                "step_id": "wipe", "action_id": "A_009", "logic": 0,
+                "slots": {"obj_a": "纸巾", "sur_a": "桌子"}, "zh": "用纸巾擦桌子",
+            }],
+        }
+        prompt = build_chain_monitor_prompt(assignment, 1)
+        self.assertIn("最后一个步骤属于短时事件动作", prompt)
+        self.assertIn("task_completion_evidence_timestamp_s；其值必须位于本次 WINDOW 内", prompt)
+        result = {
+            "status": "succeeded",
+            "description_zh": "擦拭动作已完成",
+            "task_completion_evidence_timestamp_s": 2.4,
+            "step_updates": [{
+                "step_id": "wipe", "status": "succeeded",
+                "description_zh": "纸巾与桌面接触并连续擦过",
+                "failure_reason": None,
+                "evidence": [{
+                    "timestamp_s": 2.4,
+                    "observation": "纸巾贴着桌面完成连续往返移动",
+                }],
+                "completion_evidence_timestamp_s": 2.4,
+            }],
+        }
+        self.assertEqual(validate_chain_result(result, assignment)["status"], "succeeded")
+
+    def test_new_contracts_reject_missing_required_slots(self):
+        for action_id, slots in (
+            ("A_009", {"obj_a": "纸巾"}),
+            ("A_010", {"obj_a": "马克笔"}),
+        ):
+            with self.subTest(action_id=action_id):
+                with self.assertRaisesRegex(ValueError, "缺少 slots"):
+                    build_monitor_prompt({
+                        "action_id": action_id, "logic": 0, "slots": slots,
+                    }, 1)
 
     def test_chain_prompt_treats_human_hand_as_valid_operator(self):
         prompt = build_chain_monitor_prompt({

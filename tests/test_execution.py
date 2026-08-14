@@ -90,6 +90,43 @@ class ExecutionManagerTests(unittest.IsolatedAsyncioTestCase):
         execution = await self.manager.create("把水壶放到桌子上", "test", None, STEPS)
         return await self.manager.start(execution["execution_id"])
 
+    async def test_chain_visual_monitor_claims_new_desktop_action_contracts(self):
+        desktop_steps = [
+            {
+                "action_id": "A_014", "action": "Turn", "logic": 0,
+                "slots": {"obj_a": "笔记本"}, "zh": "把笔记本翻面",
+            },
+            {
+                "action_id": "A_009", "action": "Wipe", "logic": 0,
+                "slots": {"obj_a": "纸巾", "sur_a": "桌子"}, "zh": "用纸巾擦桌子",
+            },
+            {
+                "action_id": "A_017", "action": "Open", "logic": 0,
+                "slots": {"obj_a": "笔记本电脑"}, "zh": "打开笔记本电脑",
+            },
+            {
+                "action_id": "A_016", "action": "Close", "logic": 0,
+                "slots": {"obj_a": "笔记本电脑"}, "zh": "关闭笔记本电脑",
+            },
+            {
+                "action_id": "A_010", "action": "Insert", "logic": 0,
+                "slots": {"obj_a": "马克笔", "obj_b": "笔筒"}, "zh": "把马克笔插进笔筒",
+            },
+        ]
+        execution = await self.manager.create(
+            "完成五个桌面动作", "test", None, desktop_steps,
+            execution_mode="chain_visual_monitor",
+        )
+        await self.manager.start(execution["execution_id"])
+        assignment = await self.manager.claim_visual_monitor("camera-desktop")
+        self.assertIsNotNone(assignment)
+        self.assertEqual(assignment["monitor_scope"], "chain")
+        self.assertEqual(
+            [step["action_id"] for step in assignment["steps"]],
+            ["A_014", "A_009", "A_017", "A_016", "A_010"],
+        )
+        self.assertEqual(assignment["current_step_id"], assignment["steps"][0]["step_id"])
+
     async def test_chain_visual_monitor_advances_multiple_steps_without_new_session(self):
         execution = await self.manager.create(
             "拿起水壶并放到桌子上", "test", None, CHAIN_STEPS,

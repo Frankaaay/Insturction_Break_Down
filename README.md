@@ -40,9 +40,14 @@ ARM ROS2 topic      ── planner-monitor-ros2-camera.service
 | assignment 轮询 | 1 秒 |
 | 实时预览上限 | 10 FPS、JPEG quality 65 |
 | 默认模型 | `qwen3.7-plus` |
+| 已启用视觉契约 | Pick、Carry、Place(surface)、Turn、Wipe、Open、Close、Insert |
 
 每次 VLM 请求只有一段当前视频。整链模式会由服务端附加 `CHAIN_BEFORE`、
 每个已确认步骤的一张冻结成功关键帧和 `CURRENT_NOW`；不会上传历史视频。
+
+Wipe 按当前窗口内是否明确完成了连续擦拭动作判定成功，不要求模型判断表面
+是否已经完全擦干净；其他新增动作仍以窗口结尾或 `CURRENT_NOW` 中可见的完成
+状态为准。
 
 ## 1. 登录 ARM 并检出分支
 
