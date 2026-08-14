@@ -137,7 +137,17 @@ class ExecutionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers.get("cache-control"), "no-store")
         index = (await self.client.get("/")).text
         self.assertIn("/app.js?v=evidence-timeline-20260814", index)
+        self.assertIn("已验证样例（点击即拆解）", index)
+        for instruction in (
+            "把这本笔记本翻面。",
+            "用白色纸巾擦这张桌子。",
+            "打开这台笔记本电脑。",
+            "关闭这台笔记本电脑。",
+            "把水壶放到桌子上。",
+        ):
+            self.assertIn(f'data-i="{instruction}"', index)
         script = (await self.client.get("/app.js")).text
+        self.assertIn('chip.onclick = () => { $("#instruction").value = chip.dataset.i; submitExecution(); };', script)
         self.assertNotIn("人工确认成功", script)
         self.assertIn("VLM 判定成功后将自动进入下一步骤", script)
         self.assertIn("mode-chain_visual_monitor", script)

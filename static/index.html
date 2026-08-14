@@ -431,7 +431,8 @@
     .brand p { display:none; }
     .input-row { flex-direction:column; }
     #submit { padding:13px; justify-content:center; }
-    .examples { display:none; }
+    .examples { gap:6px; }
+    .examples .label { flex-basis:100%; }
     .execution-top { flex-direction:column; }
     .execution-grid { gap:12px; }
     .monitor-buttons { grid-template-columns:1fr; }
@@ -470,12 +471,13 @@
           <input id="instruction" type="text" placeholder="例如：把水壶放到桌子上" autocomplete="off">
           <button id="submit"><span class="spinner"></span><span id="submitText">生成执行计划</span></button>
         </div>
-        <div class="examples">
-          <span class="label">快速示例：</span>
-          <button class="chip" data-i="把水壶放到桌子上">水壶放到桌上</button>
-          <button class="chip" data-i="把牛奶放进冰箱">牛奶放进冰箱</button>
-          <button class="chip" data-i="用抹布擦桌子">擦拭桌面</button>
-          <button class="chip warn" data-i="把水壶放到那边">不明确指令</button>
+        <div class="examples" aria-label="已实机验证的样例操作">
+          <span class="label">已验证样例（点击即拆解）：</span>
+          <button class="chip" data-i="把这本笔记本翻面。">翻转笔记本</button>
+          <button class="chip" data-i="用白色纸巾擦这张桌子。">纸巾擦桌子</button>
+          <button class="chip" data-i="打开这台笔记本电脑。">打开笔记本</button>
+          <button class="chip" data-i="关闭这台笔记本电脑。">关闭笔记本</button>
+          <button class="chip" data-i="把水壶放到桌子上。">水壶放到桌上</button>
         </div>
         <div class="session-lock">当前执行会话尚未结束。请先完成或终止任务，再生成新计划。</div>
       </section>

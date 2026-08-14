@@ -40,7 +40,7 @@ ARM ROS2 topic      ── planner-monitor-ros2-camera.service
 | assignment 轮询 | 1 秒 |
 | 实时预览上限 | 10 FPS、JPEG quality 65 |
 | 默认模型 | `qwen3.7-plus` |
-| 已启用视觉契约 | Pick、Carry、Place(surface)、Turn、Wipe、Open、Close、Insert |
+| 已实现视觉契约 | Pick、Carry、Place(surface)、Turn、Wipe、Open、Close、Insert |
 
 每次 VLM 请求只有一段当前视频。整链模式会由服务端附加 `CHAIN_BEFORE`、
 每个已确认步骤的一张冻结成功关键帧和 `CURRENT_NOW`；不会上传历史视频。
@@ -48,6 +48,45 @@ ARM ROS2 topic      ── planner-monitor-ros2-camera.service
 Wipe 按当前窗口内是否明确完成了连续擦拭动作判定成功，不要求模型判断表面
 是否已经完全擦干净；其他新增动作仍以窗口结尾或 `CURRENT_NOW` 中可见的完成
 状态为准。
+
+## 实机验证覆盖
+
+“已实现视觉契约”只表示代码能生成对应的 VLM 判据，不等于已经通过机器人
+头部相机的完整链路验证。以下任务已经在 ROS2 实机环境中用于验证：
+
+| 已验证任务 | 涉及的原子操作 |
+|---|---|
+| 把这本笔记本翻面。 | A_014 Turn / logic0 |
+| 用白色纸巾擦这张桌子。 | A_001 Pick / logic0 → A_009 Wipe / logic0；Planner 可按常识加入 A_003 Carry |
+| 打开这台笔记本电脑。 | A_017 Open / logic0 |
+| 关闭这台笔记本电脑。 | A_016 Close / logic0 |
+| 把水壶放到桌子上。 | A_001 Pick / logic0 → A_003 Carry / logic0 → A_002 Place / logic1 |
+
+去重后，已实机验证的原子操作为：
+
+- A_001 Pick / logic0
+- A_002 Place / logic1（表面）
+- A_003 Carry / logic0
+- A_009 Wipe / logic0
+- A_014 Turn / logic0
+- A_016 Close / logic0
+- A_017 Open / logic0
+
+尚未实机验证的原子操作为：
+
+- A_004 Pull
+- A_005 Push
+- A_006 Hang
+- A_007 Pour
+- A_008 PressButton
+- A_010 Insert
+- A_011 Rotate
+- A_012 Scoop
+- A_013 Stir
+- A_015 Swipe
+
+A_002 Place 已验证表面放置 `logic1`，但相对方位放置 `logic0` 和放入空间
+`logic2` 仍未实机验证。Pull 和 Push 的各个 logic 也都尚未实机验证。
 
 ## 1. 登录 ARM 并检出分支
 
