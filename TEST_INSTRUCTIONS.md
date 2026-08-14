@@ -31,8 +31,9 @@ python decompose.py --provider glm  # 换提供商
 | 把外套挂在衣架上 | Pick → Hang (A_006) |
 | 把茶壶里的水倒进杯子 | Pick → Pour (A_007) |
 | 按下电梯按钮 | PressButton (A_008) |
-| 用抹布擦桌子 | Pick → Wipe (A_009) |
-| 拿纸巾擦桌子 | Pick → Wipe (A_009),不应增加 Carry |
+| 用抹布擦桌子 | Pick → Wipe (A_009),可按常识加入 Carry |
+| 拿纸巾擦桌子 | Pick → Wipe 或 Pick → Carry → Wipe,不得出现多余的 Place → Pick |
+| 把纸巾从前台拿到会议桌再擦桌子 | Pick → Carry → Wipe,不得拆成 Place → Pick |
 | 把充电器插到插座上 | Pick → Insert (A_010) |
 | 把门旋转到打开状态 | Rotate (A_011) 或 Open |
 | 用勺子从锅里舀一勺汤 | Pick → Scoop (A_012) |

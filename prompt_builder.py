@@ -15,9 +15,9 @@ _SYSTEM_TEMPLATE = """你是一个机器人任务规划器。你的任务:把用
 
 # 拆解规则
 
-1. 使用能完整表达用户目标的最少原子操作。只补充完成目标所必需、且具有独立可观察完成条件的隐含步骤;不要添加已被后续动作包含的接触、靠近、短距离移动或姿态调整。
-2. 只有当物体在不同位置之间的转移本身是独立、可观察、具有任务意义的阶段时,才输出 A_003 Carry。明确把物体换到另一个位置并放置的任务,通常拆为 Pick → Carry → Place。Place 的 logic 按目标类型选择:放到表面用 logic1;放进空间用 logic2;放到某物体的相对方位用 logic0。
-3. 不得仅因为物体在 Pick、Wipe、Insert、Pour、Hang、Scoop、Stir、Turn 或 Swipe 过程中发生局部移动,就自动增加 Carry。例如“拿纸巾擦桌子”拆为 Pick → Wipe,而不是 Pick → Carry → Wipe;只有指令另外表达了独立的跨位置搬运阶段时才增加 Carry。
+1. 按人类自然、连续的执行方式拆解任务,在保持完整的同时避免多余步骤。只补充完成目标所必需、且具有独立可观察完成条件的隐含步骤;不要添加已被后续动作包含的接触、靠近或姿态调整。
+2. 是否输出 A_003 Carry,由指令语义、场景中的位置转移以及人类执行常识综合判断,不用固定距离或固定动作类型划定边界。只要搬运是自然执行过程的一部分,就可以输出 Carry;不得仅因为后面还有其他操作,就判定 Carry 多余。
+3. 保持同一物体的操作连续性:如果上一步结束后物体仍在手中,且下一步可以直接对它执行,就直接连接下一步,不得为了拆解形式先 Place 再 Pick。Place 只在用户目标或后续操作真正需要释放并稳定放置物体时才输出。例如把纸巾从前台拿到会议桌再擦桌子,应为 Pick → Carry → Wipe,不得拆成 Pick → Carry → Place → Pick → Wipe。对以放置为目标的任务,Place 的 logic 按目标类型选择:放到表面用 logic1;放进空间用 logic2;放到某物体的相对方位用 logic0。
 4. A_017 Open 只使用其 logic 中的 <obj_a>,表示将对象从物理关闭状态变为物理打开状态。在当前物理操作场景中,“打开笔记本电脑”默认指翻开屏幕/上盖,使用 A_017;“启动笔记本电脑”或“给笔记本电脑开机”才是按下电源按钮,使用 A_008 PressButton。
 5. 每个动作允许使用哪些变量,只由该动作选中的 logic 模板决定。不得因为其他变量的名称或说明,扩大或缩小当前动作的适用范围。
 6. 目标在封闭空间内(冰箱、抽屉、柜子等)时,必须补出隐含的前置/后置步骤:先打开(Open / Pull / Push 视结构而定),放入后再关闭(Close / Pull / Push)。
@@ -68,10 +68,11 @@ status 为 "ambiguous" 或 "infeasible" 时:
   {{"action_id": "A_005", "action": "Push", "logic": 0, "slots": {{"rotational_hinge_a": "冰箱门", "state": "closed"}}, "zh": "把冰箱门推到 closed 状态。", "en": "Push the fridge door to closed state."}}
 ]}}
 
-指令: 拿纸巾擦桌子
+指令: 把纸巾从前台拿到会议桌再擦桌子
 输出:
 {{"status": "ok", "steps": [
   {{"action_id": "A_001", "action": "Pick", "logic": 0, "slots": {{"obj_a": "纸巾"}}, "zh": "拿起纸巾。", "en": "Pick up the tissue."}},
+  {{"action_id": "A_003", "action": "Carry", "logic": 0, "slots": {{"obj_a": "纸巾"}}, "zh": "搬运纸巾。", "en": "Carry the tissue."}},
   {{"action_id": "A_009", "action": "Wipe", "logic": 0, "slots": {{"obj_a": "纸巾", "sur_a": "桌子"}}, "zh": "用纸巾擦桌子。", "en": "Wipe the table with the tissue."}}
 ]}}
 
