@@ -28,11 +28,12 @@ python decompose.py --provider glm  # 换提供商
 
 | 指令 | 预期涉及的操作 |
 |---|---|
-| 把外套挂在衣架上 | Pick → Carry → Hang (A_006) |
-| 把茶壶里的水倒进杯子 | Pick → Carry → Pour (A_007) |
+| 把外套挂在衣架上 | Pick → Hang (A_006) |
+| 把茶壶里的水倒进杯子 | Pick → Pour (A_007) |
 | 按下电梯按钮 | PressButton (A_008) |
-| 用抹布擦桌子 | Pick → Carry → Wipe (A_009) |
-| 把充电器插到插座上 | Pick → Carry → Insert (A_010) |
+| 用抹布擦桌子 | Pick → Wipe (A_009) |
+| 拿纸巾擦桌子 | Pick → Wipe (A_009),不应增加 Carry |
+| 把充电器插到插座上 | Pick → Insert (A_010) |
 | 把门旋转到打开状态 | Rotate (A_011) 或 Open |
 | 用勺子从锅里舀一勺汤 | Pick → Scoop (A_012) |
 | 用筷子搅拌碗里的鸡蛋 | Pick → Stir (A_013) |
@@ -40,6 +41,7 @@ python decompose.py --provider glm  # 换提供商
 | 用门禁卡刷一下读卡器 | Pick → Swipe (A_015) |
 | 关掉电视 | Close (A_016) 或 PressButton |
 | 打开笔记本电脑 | Open (A_017) |
+| 给笔记本电脑开机 | PressButton (A_008,电源按钮) |
 
 ## 四、指令不明确 — 预期返回 `[指令不明确] + 原因`
 

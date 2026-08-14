@@ -1,14 +1,14 @@
 原子操作列表
 
 变量说明：
-  <obj_a> / <obj_b>            物品(obj_a 通常是手里操作的物品,obj_b 是目标/容器物品)
-  <sur_a>                      表面（桌面、台面等可放置的面）
-  <spa_a>                      空间（冰箱、抽屉等可放入的内部空间）
-  <rotational_hinge_a>         旋转铰链部件（如门、柜门）
-  <sliding_hinge_a>            滑动铰链部件（如抽屉、推拉门）
-  <button_a>                   按钮
-  <state>                      铰链目标状态
-  <coef_...>                   系数/修饰词，从对应 coef 列表中取值
+  <obj_a> / <obj_b>            操作模板中的对象参数，具体角色由所在 logic 决定
+  <sur_a>                      可承载物体的表面参数
+  <spa_a>                      可容纳物体的空间参数
+  <rotational_hinge_a>         旋转铰链部件参数
+  <sliding_hinge_a>            滑动铰链部件参数
+  <button_a>                   按钮参数
+  <state>                      模板要求的目标状态
+  <coef_...>                   从对应 coef 列表选择的修饰参数
 
 ========================================
 
@@ -149,4 +149,3 @@ Open
 logic0: Open the <obj_a>.
 
         打开 <obj_a>。
-

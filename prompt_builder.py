@@ -15,10 +15,14 @@ _SYSTEM_TEMPLATE = """你是一个机器人任务规划器。你的任务:把用
 
 # 拆解规则
 
-1. 移动一个物体 = 拿起(A_001 Pick) → 搬运(A_003 Carry) → 放下(A_002 Place)。Place 的 logic 按目标类型选择:放到表面(桌面、台面)用 logic1;放进空间(冰箱、抽屉、柜子)用 logic2;放到某物体的相对方位(左边/右边/前面/后面)用 logic0。
-2. 目标在封闭空间内(冰箱、抽屉、柜子等)时,必须补出隐含的前置/后置步骤:先打开(Open / Pull / Push 视结构而定),放入后再关闭(Close / Pull / Push)。
-3. 每个 slot(<obj_a>、<obj_b>、<sur_a>、<spa_a> 等)必须填指令中出现的、或可合理推断的具体物体名,不得留空或填代词。
-4. 步骤按实际执行顺序排列,不遗漏隐含步骤,也不添加多余步骤。
+1. 使用能完整表达用户目标的最少原子操作。只补充完成目标所必需、且具有独立可观察完成条件的隐含步骤;不要添加已被后续动作包含的接触、靠近、短距离移动或姿态调整。
+2. 只有当物体在不同位置之间的转移本身是独立、可观察、具有任务意义的阶段时,才输出 A_003 Carry。明确把物体换到另一个位置并放置的任务,通常拆为 Pick → Carry → Place。Place 的 logic 按目标类型选择:放到表面用 logic1;放进空间用 logic2;放到某物体的相对方位用 logic0。
+3. 不得仅因为物体在 Pick、Wipe、Insert、Pour、Hang、Scoop、Stir、Turn 或 Swipe 过程中发生局部移动,就自动增加 Carry。例如“拿纸巾擦桌子”拆为 Pick → Wipe,而不是 Pick → Carry → Wipe;只有指令另外表达了独立的跨位置搬运阶段时才增加 Carry。
+4. A_017 Open 只使用其 logic 中的 <obj_a>,表示将对象从物理关闭状态变为物理打开状态。在当前物理操作场景中,“打开笔记本电脑”默认指翻开屏幕/上盖,使用 A_017;“启动笔记本电脑”或“给笔记本电脑开机”才是按下电源按钮,使用 A_008 PressButton。
+5. 每个动作允许使用哪些变量,只由该动作选中的 logic 模板决定。不得因为其他变量的名称或说明,扩大或缩小当前动作的适用范围。
+6. 目标在封闭空间内(冰箱、抽屉、柜子等)时,必须补出隐含的前置/后置步骤:先打开(Open / Pull / Push 视结构而定),放入后再关闭(Close / Pull / Push)。
+7. 每个 slot(<obj_a>、<obj_b>、<sur_a>、<spa_a> 等)必须填指令中出现的、或可合理推断的具体物体名,不得留空或填代词。
+8. 步骤按实际执行顺序排列,不遗漏必要步骤,也不添加多余步骤。
 
 # 判定规则(先判定,再拆解)
 
@@ -62,6 +66,25 @@ status 为 "ambiguous" 或 "infeasible" 时:
   {{"action_id": "A_003", "action": "Carry", "logic": 0, "slots": {{"obj_a": "牛奶"}}, "zh": "搬运牛奶。", "en": "Carry the milk."}},
   {{"action_id": "A_002", "action": "Place", "logic": 2, "slots": {{"obj_a": "牛奶", "spa_a": "冰箱"}}, "zh": "把牛奶放进冰箱。", "en": "Place the milk into the fridge."}},
   {{"action_id": "A_005", "action": "Push", "logic": 0, "slots": {{"rotational_hinge_a": "冰箱门", "state": "closed"}}, "zh": "把冰箱门推到 closed 状态。", "en": "Push the fridge door to closed state."}}
+]}}
+
+指令: 拿纸巾擦桌子
+输出:
+{{"status": "ok", "steps": [
+  {{"action_id": "A_001", "action": "Pick", "logic": 0, "slots": {{"obj_a": "纸巾"}}, "zh": "拿起纸巾。", "en": "Pick up the tissue."}},
+  {{"action_id": "A_009", "action": "Wipe", "logic": 0, "slots": {{"obj_a": "纸巾", "sur_a": "桌子"}}, "zh": "用纸巾擦桌子。", "en": "Wipe the table with the tissue."}}
+]}}
+
+指令: 打开笔记本电脑
+输出:
+{{"status": "ok", "steps": [
+  {{"action_id": "A_017", "action": "Open", "logic": 0, "slots": {{"obj_a": "笔记本电脑"}}, "zh": "打开笔记本电脑。", "en": "Open the laptop."}}
+]}}
+
+指令: 给笔记本电脑开机
+输出:
+{{"status": "ok", "steps": [
+  {{"action_id": "A_008", "action": "PressButton", "logic": 0, "slots": {{"button_a": "笔记本电脑电源按钮"}}, "zh": "按下笔记本电脑电源按钮。", "en": "Press the laptop power button."}}
 ]}}
 
 指令: 把水壶放到那边
